@@ -38,13 +38,16 @@ def run_pipeline(cfg, whisper_model_instance=None) -> list[dict]:
 
     # Step 1 — Download
     source_platform = getattr(cfg, "source_platform", "youtube")
+    source_section = getattr(cfg, "source_section", None)
     engine.download_video(
         cfg.url_youtube,
         cfg.file_video_asli,
-        getattr(cfg, "use_dlp_subs", False),
+        # Platform subtitles carry full-video timestamps; don't even fetch them for a section.
+        getattr(cfg, "use_dlp_subs", False) and not source_section,
         getattr(cfg, "download_source_height", "max"),
         source_platform=source_platform,
         yt_cookies=getattr(cfg, "yt_cookies", None),
+        source_section=source_section,
     )
 
     # Step 2 — Transcribe

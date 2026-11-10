@@ -6,6 +6,7 @@ Maps to Cell 2 (The Engine) of the notebook.
 
 import json
 import os
+import subprocess
 import re
 import time
 
@@ -54,6 +55,8 @@ _PLATFORM_LABELS = {
     "tiktok": "TikTok",
     "instagram": "Instagram",
     "gdrive": "Google Drive",
+    "twitch": "Twitch",
+    "kick": "Kick",
 }
 
 
@@ -139,6 +142,7 @@ def download_video(
     download_source_height: str | int = "max",
     source_platform: str = "youtube",
     yt_cookies: str | None = None,
+    source_section: tuple[float, float] | None = None,
 ) -> None:
     """
     Download a video to *output_path* with configurable source height.
@@ -160,6 +164,12 @@ def download_video(
 
     # --- Google Drive: use gdown instead of yt-dlp ---
     if source_platform == "gdrive":
+        if source_section:
+            print(
+                "      ⚠️ --source-section is not supported for Google Drive: "
+                "downloading the whole file. Clip times are relative to the full video.",
+                flush=True,
+            )
         _download_gdrive(url, output_path)
         if not os.path.exists(output_path):
             raise RuntimeError(
@@ -194,6 +204,20 @@ def download_video(
 
     _apply_cookies(ydl_opts, yt_cookies)
 
+    if source_section:
+        from yt_dlp.utils import download_range_func
+        # Fast path: cuts snap to keyframes (no re-encode), so the file can run a few seconds long.
+        ydl_opts["download_ranges"] = download_range_func(None, [source_section])
+        print(f"      ✂️ Section only: {source_section[0]:.0f}s to {source_section[1]:.0f}s (keyframe-aligned)", flush=True)
+        # Platform subtitles carry full-video timestamps; the runner would apply them to the
+        # section file. Drop them (including stale ones) so Whisper transcribes the section.
+        import glob
+        for stale in glob.glob(output_path.replace(".mp4", ".*.json3")):
+            os.remove(stale)
+        if use_dlp_subs:
+            print("      ℹ️ --use-dlp-subs skipped for a section download; Whisper will transcribe it.", flush=True)
+            use_dlp_subs = False
+
     # --- Subtitle download — only supported for YouTube ---
     if use_dlp_subs and uses_youtube_format:
         print("      Mencoba mencari subtitle bahasa otomatis (en / id)...")
@@ -222,7 +246,15 @@ def download_video(
     elif use_dlp_subs and not uses_youtube_format:
         print(f"      ℹ️ {platform_label} tidak menyediakan subtitle otomatis. Whisper akan digunakan.")
 
+    # Offline cache hit first: same normalized URL and section needs no network at all
+    # (re-running analysis without a connection or under rate limiting).
+    url_key = _normalize_url(url)
+    if _cache_matches(output_path, source_section, url_key=url_key, quiet=True):
+        return
+
     # Jalankan download video terpisah dari urusan subtitle
+    info = None
+    meta_error = None
     with YoutubeDL(ydl_opts) as ydl:
         # Extra step to verify resolution before downloading
         try:
@@ -231,16 +263,265 @@ def download_video(
             v_codec = info.get("vcodec", "unknown")
             print(f"      ✅ Mendownload: {best_h}p (Codec: {v_codec})", flush=True)
         except Exception as e:
+            meta_error = e
             print(f"      ⚠️ Gagal mengecek info detail: {e}", flush=True)
 
-        ydl.download([url])
+    if info is None and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        # Can't tell whether the cached file is this video. Reusing it risks clipping the
+        # wrong VOD; downloading would only fail with a network traceback. Say what happened.
+        cached = _read_sidecar(output_path)
+        why = _mismatch_reason(_load_record(cached), output_path, source_section, url_key, None)
+        raise RuntimeError(
+            f"❌ Could not match the cached source to this request while offline.\n"
+            f"      Cached file: {output_path}\n"
+            f"      Recorded URL: {(cached or {}).get('url') or 'unknown'}\n"
+            f"      Requested URL: {url}\n"
+            f"      Offline check failed: {why}.\n"
+            f"      The video id lookup also failed ({meta_error}), so it was not reused or replaced.\n"
+            "      Rerun with the recorded URL and section, or reconnect."
+        )
+
+    # Different URL spelling for the same video (?t=, tracking params): match on extractor id.
+    source_key = _source_key(url, info)
+    if _cache_matches(output_path, source_section, url_key=url_key, source_key=source_key):
+        return
+
+    # Download to a temp file and swap it in only on success, so a failed or
+    # killed download never destroys the previous cached source.
+    tmp_path = os.path.splitext(output_path)[0] + ".download.mp4"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)  # leftover from a killed run; yt-dlp would treat it as done
+    try:
+        with YoutubeDL({**ydl_opts, "outtmpl": tmp_path}) as ydl:
+            ydl.download([url])
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
     # --- Post-download verification ---
-    if not os.path.exists(output_path):
+    if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
         raise RuntimeError(
             f"❌ Download dari {platform_label} gagal — file video tidak ditemukan di {output_path}.\n"
             "      Pastikan URL valid dan bisa diakses secara publik."
         )
+
+    if source_section:
+        actual = _report_section_duration(tmp_path, source_section)
+    else:
+        actual = _probe_duration(tmp_path)
+    # ponytail: a kill between these steps leaves the new video without a sidecar; the next
+    # section request then redownloads (safe). Old sidecar goes first so it can't vouch for the new file.
+    if os.path.exists(_sidecar_path(output_path)):
+        os.remove(_sidecar_path(output_path))
+    os.replace(tmp_path, output_path)
+    _write_source_sidecar(output_path, source_key, url, url_key, source_section, actual)
+
+
+def _probe_duration(path: str) -> float | None:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout.strip()
+        return float(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _sidecar_path(video_path: str) -> str:
+    return os.path.splitext(video_path)[0] + ".source.json"
+
+
+def _source_key(url, info):
+    """Stable identity of a video: extractor + id when known, so ?t= or tracking params don't matter."""
+    if info and info.get("extractor_key") and info.get("id"):
+        return f"{info['extractor_key']}:{info['id']}"
+    return url
+
+
+_TRACKING_PARAMS = {"t", "start", "si", "feature", "fbclid", "gclid", "ref", "pp"}
+
+
+def _normalize_url(url):
+    """URL without fragment, timestamp or tracking params, query sorted. Identity params like ?v= stay."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url.strip())
+    query = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+    )
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"),
+                       urlencode(query), ""))
+
+
+def _normalize_section(section):
+    """(start, end) as floats, or None. Sections arrive pre-parsed, so every spelling of a range matches."""
+    if not section:
+        return None
+    return [round(float(section[0]), 3), round(float(section[1]), 3)]
+
+
+def _write_source_sidecar(video_path, source_key, url, url_key, section, actual_duration):
+    """Record what the cached source contains (atomically), so a later run can tell if it matches."""
+    _save_sidecar(video_path, {
+        "source_key": source_key,
+        "url": url,
+        "normalized_urls": [url_key],
+        "section": _normalize_section(section),
+        "actual_duration": actual_duration,
+    })
+
+
+def _save_sidecar(video_path, data):
+    path = _sidecar_path(video_path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+MAX_KNOWN_URLS = 8  # a sidecar is not a log: unknown per-share params must not grow it forever
+
+
+def _validated_record(raw):
+    """Typed fields from a parsed sidecar dict. Raises ValueError on wrong shapes.
+
+    This is the only place that interprets sidecar data, so the decision logic
+    below can assume clean types and its own bugs surface instead of looking
+    like a malformed file. Every field is optional; older sidecars lack some.
+    """
+    def opt(key, types):
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, types)):
+            raise ValueError(f"sidecar field {key!r} has type {type(value).__name__}")
+        return value
+
+    urls = opt("normalized_urls", list) or []
+    if not all(isinstance(u, str) for u in urls):
+        raise ValueError("sidecar field 'normalized_urls' must hold strings")
+    single = opt("normalized_url", str)  # round-4 shape
+    section = opt("section", list)
+    if section is not None:
+        if len(section) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in section):
+            raise ValueError("sidecar field 'section' must be [start, end]")
+        section = [round(float(x), 3) for x in section]
+        # Also rejects NaN (every comparison is False) and infinite ends.
+        if not (0 <= section[0] < section[1] < float("inf")):
+            raise ValueError("sidecar field 'section' must satisfy 0 <= start < end")
+    duration = opt("actual_duration", (int, float))
+    url = opt("url", str)
+    return {
+        "url": url,
+        "source_key": opt("source_key", str) or url,
+        "known_urls": urls + ([single] if single and single not in urls else []),
+        "section": section,
+        "actual_duration": float(duration) if duration is not None else None,
+    }
+
+
+def _load_record(raw):
+    """None (no sidecar), "unreadable", "malformed", or a validated record."""
+    if raw is None:
+        return None
+    if not raw:
+        return "unreadable"
+    try:
+        return _validated_record(raw)
+    except ValueError:
+        return "malformed"
+
+
+def _read_sidecar(video_path):
+    """The sidecar dict; None if absent; {} if unreadable or truncated (treated as unknown)."""
+    path = _sidecar_path(video_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _mismatch_reason(record, video_path, section, url_key, source_key):
+    """Why the cache can't serve this request, or None. `record` comes from _load_record."""
+    if record is None:
+        return "no record of what it contains"
+    if record == "unreadable":
+        return "its record is unreadable"
+    if record == "malformed":
+        return "its record is malformed"
+    if source_key is None:
+        if url_key not in record["known_urls"]:
+            return f"it was recorded for a different URL ({record['url']})"
+    elif record["source_key"] != source_key:
+        return f"it holds a different video ({record['url']})"
+    if record["section"] != _normalize_section(section):
+        had = record["section"]
+        return f"it holds section {had[0]:.0f}-{had[1]:.0f}s" if had else "it holds the full video"
+    recorded = record["actual_duration"]
+    current = _probe_duration(video_path) if recorded else None
+    if recorded and current is not None and abs(current - recorded) > 1.0:
+        return f"its length changed from {recorded:.1f}s to {current:.1f}s (truncated?)"
+    return None
+
+
+def _cache_matches(video_path, section, *, url_key=None, source_key=None, quiet=False):
+    """True when the cached source can be reused for this request.
+
+    Identity is checked by extractor id when source_key is given (needs a
+    metadata call), otherwise by normalized URL (no network).
+    Gates, in order: the file exists and is non-empty; the sidecar records the
+    same source and section; the file's length still matches what was recorded.
+    A legacy file with no sidecar is reused only for a full-video request, as
+    before. Anything else is replaced, but only after the new download succeeds.
+    quiet=True suppresses the mismatch banner (used for the offline first check).
+    On an id match, url_key is remembered so that spelling is an offline hit next time.
+    """
+    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+        return False
+    raw = _read_sidecar(video_path)
+    if raw is None and not section:
+        return True  # legacy full-video cache: same reuse as before sidecars existed
+    record = _load_record(raw)
+    reason = _mismatch_reason(record, video_path, section, url_key, source_key)
+    if reason is None:
+        how = "url" if source_key is None else "video id"
+        print(f"      ♻️ Reusing cached source (matches {how} and section).", flush=True)
+        if source_key is not None and url_key and url_key not in record["known_urls"]:
+            urls = (record["known_urls"] + [url_key])[-MAX_KNOWN_URLS:]
+            _save_sidecar(video_path, {**raw, "normalized_urls": urls})
+        return True
+    if quiet:
+        return False
+    bar = "!" * 70
+    lines = [
+        "", bar,
+        f"⚠️  Cached source does not match this request ({reason}).",
+        f"    Downloading again; it is replaced only if the new download succeeds: {video_path}",
+        bar, "",
+    ]
+    print("\n".join(lines), flush=True)
+    return False
+
+
+def _report_section_duration(path: str, section: tuple[float, float]) -> float | None:
+    """Log the real duration of a section download and warn when it differs from the request."""
+    requested = section[1] - section[0]
+    actual = _probe_duration(path)
+    if actual is None:
+        print("      ⚠️ Could not measure section length (ffprobe failed).", flush=True)
+        return None
+    print(f"      ✂️ Section length: {actual:.1f}s (requested {requested:.1f}s)", flush=True)
+    if abs(actual - requested) > 1.0:
+        print(
+            "      ⚠️ Section is approximate: cuts snap to keyframes, so clips may include "
+            f"up to {abs(actual - requested):.0f}s outside the requested window.",
+            flush=True,
+        )
+    return actual
 
 
 # ==============================================================================

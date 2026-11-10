@@ -54,6 +54,7 @@ broll = _load_studio_internal_module("broll.py", "clipping_studio_broll")
 crop_center_broll = broll.crop_center_broll
 face_detection = _load_studio_internal_module("face_detection.py", "clipping_studio_face_detection")
 get_face_detector = face_detection.get_face_detector
+_gameplay = _load_studio_internal_module("gameplay_layout.py", "clipping_studio_gameplay_layout")
 
 def buat_video_hybrid(
     input_video,
@@ -114,6 +115,56 @@ def buat_video_hybrid(
     # =======================================================
 
     video_encoder = detect_video_encoder(cfg)
+
+    gameplay = _gameplay.active_layout(cfg, rasio)
+    if gameplay:
+        cap_g = cv2.VideoCapture(input_video)
+        src_w_g = cap_g.get(cv2.CAP_PROP_FRAME_WIDTH)
+        src_h_g = int(cap_g.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps_g = cap_g.get(cv2.CAP_PROP_FPS)
+        if not fps_g or math.isnan(fps_g):  # NaN is truthy; "-r nan" kills ffmpeg at startup
+            fps_g = 30.0
+        cap_g.release()
+        out_w_g, out_h_g = _get_render_dims(cfg, rasio, source_h=src_h_g)
+        opts_g = _gameplay.options(cfg)
+        idle = _gameplay.idle_alignments(
+            src_w_g, src_h_g, opts_g["crop"],
+            *_gameplay.panel_size(gameplay, out_w_g, out_h_g, opts_g["cam_share"]),
+            opts_g["fit"], opts_g["align_h"], opts_g["align_v"],
+        )
+        if idle:
+            _gameplay.warn_once(
+                cfg, f"   ⚠️ {', '.join(idle)} has no effect: no slack on that axis "
+                     f"with --gameplay-fit {opts_g['fit']} for this source."
+            )
+        wm_png = None
+        if getattr(cfg, "watermark_enabled", False):
+            import tempfile
+            _wm_mod = _load_studio_internal_module("watermark.py", "clipping_studio_watermark")
+            # Unique per render: concurrent renders in the same cwd must not share the overlay.
+            fd, wm_png = tempfile.mkstemp(
+                prefix=os.path.splitext(os.path.basename(output_video))[0] + "_wm_",
+                suffix=".png", dir=os.path.dirname(os.path.abspath(output_video)),
+            )
+            os.close(fd)
+        print(f"🎮 {label} - Gameplay layout ({'fit' if gameplay == 'fit' else 'facecam'})...", flush=True)
+        try:
+            if wm_png:
+                _gameplay.make_watermark_overlay(_wm_mod.apply_watermark, cfg, out_w_g, out_h_g, wm_png)
+            _gameplay.render(
+                input_video, output_video, start_clip, end_clip, gameplay, out_w_g, out_h_g, cfg,
+                encode_args=get_mp4_encode_args(video_encoder, fps_g),
+                run_ffmpeg=lambda cmd, dur, lbl: run_ffmpeg_with_progress(
+                    build_ffmpeg_progress_cmd(cmd, output_video), dur, label=lbl
+                ),
+                watermark_png=wm_png,
+                label=label,
+            )
+        finally:
+            if wm_png and os.path.exists(wm_png):
+                os.remove(wm_png)
+        print(f"✅ {label} selesai.", flush=True)
+        return lambda t: src_w_g / 2
 
     yolo_model = None
     detector = None

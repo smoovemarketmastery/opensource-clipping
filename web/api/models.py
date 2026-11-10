@@ -31,6 +31,8 @@ class SourcePlatform(str, enum.Enum):
     TIKTOK = "tiktok"
     INSTAGRAM = "instagram"
     GDRIVE = "gdrive"
+    TWITCH = "twitch"
+    KICK = "kick"
 
 
 class AspectRatio(str, enum.Enum):

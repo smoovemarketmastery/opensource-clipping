@@ -58,6 +58,7 @@ broll = _load_studio_internal_module("broll.py", "clipping_studio_broll")
 download_pexels_broll = broll.download_pexels_broll
 crop_center_broll = broll.crop_center_broll
 subtitles = _load_studio_internal_module("subtitles.py", "clipping_studio_subtitles")
+_gameplay = _load_studio_internal_module("gameplay_layout.py", "clipping_studio_gameplay_layout")
 buat_file_ass = subtitles.buat_file_ass
 effects = _load_studio_internal_module("effects.py", "clipping_studio_effects")
 siapkan_glitch_video = effects.siapkan_glitch_video
@@ -251,7 +252,8 @@ def proses_klip(
 
     broll_list = clip.get("broll_list", [])
     broll_aktif = []
-    if cfg.use_broll and broll_list:
+    # Gameplay layout never shows B-roll, so don't download it (same predicate as the renderer).
+    if cfg.use_broll and broll_list and not _gameplay.active_layout(cfg, rasio):
         print(f"   🎥 Mendownload {len(broll_list)} video B-Roll dari Pexels...")
         for i, br in enumerate(broll_list):
             q = br.get("search_query", "nature")

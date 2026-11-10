@@ -15,7 +15,7 @@ from types import SimpleNamespace
 # SCHEMA CONSTANTS
 # ==============================================================================
 
-SUPPORTED_PLATFORMS = {"youtube", "tiktok", "instagram", "gdrive", "local"}
+SUPPORTED_PLATFORMS = {"youtube", "tiktok", "instagram", "gdrive", "local", "twitch", "kick"}
 
 _REQUIRED_SOURCE_FIELDS = {"id", "name", "platform"}
 _REQUIRED_CLIP_FIELDS = {"clip_id", "title", "hook", "highlight"}

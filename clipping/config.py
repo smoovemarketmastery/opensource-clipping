@@ -221,6 +221,59 @@ def _parse_download_height(val: str) -> str | int:
         raise argparse.ArgumentTypeError("Download source height must be a positive integer.")
     return parsed
 
+def _parse_section(val: str) -> tuple[float, float]:
+    def secs(t):
+        parts = [float(p) for p in t.strip().split(":")]
+        if not 1 <= len(parts) <= 3 or any(p < 0 for p in parts):
+            raise ValueError
+        total = 0.0
+        for p in parts:
+            total = total * 60 + p
+        return total
+    try:
+        a, b = (secs(t) for t in val.split("-"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--source-section '{val}': use START-END like 2:00:00-3:30:00")
+    if b <= a:
+        raise argparse.ArgumentTypeError(f"--source-section '{val}': END must be after START")
+    return (a, b)
+
+
+def _parse_box(val: str, flag: str) -> tuple[float, float, float, float]:
+    try:
+        x, y, w, h = (float(p) for p in val.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{flag} '{val}': use four fractions x,y,w,h, e.g. 0.75,0.70,0.25,0.30"
+        )
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1
+            and x + w <= 1.0001 and y + h <= 1.0001):
+        raise argparse.ArgumentTypeError(
+            f"{flag} '{val}': x,y,w,h must be fractions 0-1 and the box must fit inside the frame"
+        )
+    return (x, y, w, h)
+
+
+def _parse_gameplay_layout(val: str):
+    if val.strip().lower() == "fit":
+        return "fit"
+    return _parse_box(val, "--gameplay-layout")
+
+
+def _parse_gameplay_crop(val: str):
+    return _parse_box(val, "--gameplay-crop")
+
+
+def _parse_cam_share(val: str) -> float:
+    try:
+        share = float(val)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--gameplay-cam-share '{val}': must be a number like 0.35")
+    if not 0.1 <= share <= 0.7:
+        raise argparse.ArgumentTypeError(f"--gameplay-cam-share {share}: must be between 0.1 and 0.7")
+    return share
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="🎬 OpenSource Clipping — AI Auto-Clipper & Teaser Generator",
@@ -238,9 +291,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--source",
-        choices=["youtube", "tiktok", "instagram", "gdrive"],
+        choices=["youtube", "tiktok", "instagram", "gdrive", "twitch", "kick"],
         default=SOURCE_PLATFORM,
         help="Video source platform. Determines download behavior and subtitle availability.",
+    )
+    p.add_argument(
+        "--source-section", type=_parse_section, default=None,
+        help="Download only part of a long VOD, e.g. 2:00:00-3:30:00. Clip times are relative to the section start.",
     )
     p.add_argument(
         "--tiktok",
@@ -498,6 +555,56 @@ def _build_parser() -> argparse.ArgumentParser:
         "--static-crop",
         action="store_true",
         help="Disable face tracking and use static center crop for 1:1, 3:4, and 4:5 ratios",
+    )
+    p.add_argument(
+        "--gameplay-layout",
+        type=_parse_gameplay_layout,
+        default=None,
+        help="Gameplay layout for non-16:9 ratios, replacing face tracking. "
+             "'x,y,w,h' = facecam box in the source as fractions (e.g. 0.75,0.70,0.25,0.30): "
+             "facecam on top, gameplay below. 'fit' = no facecam, gameplay fills the frame. "
+             "Skips B-roll. Ignored in --dev-mode. Cannot combine with --split-screen or --camera-switch.",
+    )
+    p.add_argument(
+        "--gameplay-crop",
+        type=_parse_gameplay_crop,
+        default=None,
+        help="Region of the source used as gameplay, as fractions x,y,w,h. Default: whole frame.",
+    )
+    p.add_argument(
+        "--gameplay-fit",
+        choices=["contain", "cover"],
+        default=None,
+        help="contain = show the whole gameplay region over a blurred copy (keeps HUD/minimap). "
+             "cover = fill the panel and crop the overflow. Default: contain.",
+    )
+    p.add_argument(
+        "--gameplay-align-h",
+        choices=["left", "center", "right"],
+        default=None,
+        help="Horizontal placement of the gameplay in its panel (contain) or kept side (cover). "
+             "Only moves anything when that axis has slack; a warning says when it doesn't. Default: center.",
+    )
+    p.add_argument(
+        "--gameplay-align-v",
+        choices=["top", "center", "bottom"],
+        default=None,
+        help="Vertical placement of the gameplay in its panel (contain) or kept side (cover). "
+             "Only moves anything when that axis has slack; a warning says when it doesn't. Default: center.",
+    )
+    p.add_argument(
+        "--gameplay-cam-share",
+        type=_parse_cam_share,
+        default=None,
+        help="Fraction of output height used by the facecam (0.1-0.7). Default: 0.35.",
+    )
+    p.add_argument(
+        "--gameplay-mask-cam",
+        choices=["blur", "darken", "none"],
+        default=None,
+        help="Hide the duplicate facecam inside the gameplay. Default: blur when a facecam box is given. "
+             "This is redaction: the blur stays inside the cam box and keeps a hard edge, which "
+             "sits on the stream overlay's own border.",
     )
 
     # --- Smart Auto-Framing / Tracking ---
@@ -784,6 +891,18 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
     if not args.story_mode and not args.url:
         parser.error("--url is required unless --story-mode is used.")
 
+    if args.gameplay_layout and (args.split_screen or args.camera_switch):
+        parser.error("--gameplay-layout cannot be combined with --split-screen or --camera-switch.")
+    gameplay_opts = (args.gameplay_crop, args.gameplay_fit, args.gameplay_align_h,
+                     args.gameplay_align_v, args.gameplay_cam_share, args.gameplay_mask_cam)
+    if not args.gameplay_layout and any(v is not None for v in gameplay_opts):
+        parser.error("--gameplay-* options need --gameplay-layout.")
+    if args.gameplay_layout == "fit" and args.gameplay_mask_cam in ("blur", "darken"):
+        parser.error("--gameplay-mask-cam needs a facecam box; --gameplay-layout fit has none.")
+    if args.gameplay_layout and args.dev_mode:
+        print("⚠️ --gameplay-layout is ignored in --dev-mode (dev output has its own fixed size).", flush=True)
+    has_cam_box = isinstance(args.gameplay_layout, tuple)
+
     # Normalize URL list for batch support
     url_list = args.url if isinstance(args.url, list) else ([args.url] if args.url else [])
 
@@ -934,6 +1053,14 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         dev_mode_with_output_merge=args.dev_mode_with_output_merge,
         track_lines=args.track_lines,
         static_crop=args.static_crop,
+        gameplay_layout=args.gameplay_layout,
+        gameplay_crop=args.gameplay_crop,
+        gameplay_fit=args.gameplay_fit or "contain",
+        gameplay_align_h=args.gameplay_align_h or "center",
+        gameplay_align_v=args.gameplay_align_v or "center",
+        gameplay_cam_share=args.gameplay_cam_share or 0.35,
+        gameplay_mask_cam=args.gameplay_mask_cam or ("blur" if has_cam_box else "none"),
+        source_section=args.source_section,
         # Story Clip Mode
         story_mode=args.story_mode,
         story_recipe_path=os.path.abspath(args.story_recipe) if args.story_recipe else None,

@@ -259,7 +259,8 @@ python main.py --help
 |---|---|---|
 | `--url`, `-u` | — | Video URL to process (Required) |
 | `--yt-cookies` | `None` | Cookies from browser (e.g. `chrome`) or path to `cookies.txt` to avoid yt-dlp blocks |
-| `--source` | `youtube` | Video source platform. Choices: `youtube`, `tiktok`, `instagram`, `gdrive`. |
+| `--source` | `youtube` | Video source platform. Choices: `youtube`, `tiktok`, `instagram`, `gdrive`, `twitch`, `kick`. |
+| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00`. Keyframe-aligned, so it can run a few seconds long. Clip times are relative to the section. A cached source is reused only if its `.source.json` sidecar matches the source and range. With `--use-dlp-subs`, platform subtitles are skipped for a section (their timestamps are for the full video), so Whisper transcribes the section instead: slower, and accuracy can differ from YouTube's captions |
 | `--clips`, `-n` | `7` | Number of highlight clips to generate |
 | `--ratio`, `-r` | `9:16` | Output aspect ratio (`9:16`, `16:9`, `1:1`, `3:4`, `4:5`) |
 | `--source-height` | `max` | Preferred source download max height (`max`, `1080`, `1440`, `2160`, etc.) |
@@ -303,6 +304,13 @@ python main.py --help
 | `--dev-mode-with-output-merge` | `False` | **[Experimental]** Generates a merged ultrawide side-by-side video of the final output and the dev dashboard with boxed framing (v0.9.3). |
 | `--track-lines` | `False` | Draw crosshair tracking lines extending from the face box to the boundaries |
 | `--static-crop` | `False` | Disable face tracking and use static center crop for `1:1`, `3:4`, and `4:5` formats |
+| `--gameplay-layout` | `None` | Gaming layout for non-16:9 ratios. `x,y,w,h` = facecam box (source fractions), stacked above the gameplay. `fit` = no facecam. Replaces face tracking and skips B-roll. Ignored in `--dev-mode`. Cannot combine with `--split-screen`/`--camera-switch` |
+| `--gameplay-crop` | `None` | Source region used as gameplay (`x,y,w,h` fractions), e.g. to exclude an overlaid facecam or chat. Default: whole frame |
+| `--gameplay-fit` | `contain` | `contain` shows the whole gameplay region over a blurred copy (keeps HUD/minimap). `cover` fills the panel and crops the overflow |
+| `--gameplay-align-h` | `center` | `left`, `center`, `right`. Moves the gameplay inside its panel (`contain`) or picks the kept part (`cover`). Warns when that axis has no slack |
+| `--gameplay-align-v` | `center` | `top`, `center`, `bottom`. Same as above for the vertical axis. The panel size is fixed, so the stack always fills the frame |
+| `--gameplay-mask-cam` | `blur` with a cam box | `blur`, `darken` or `none`. Hides the copy of the facecam that is still inside the gameplay |
+| `--gameplay-cam-share` | `0.35` | Fraction of output height used by the facecam (0.1-0.7) |
 | `--yolo-size` | `8m` | YOLO face track model (`8n`, `8s`, `8m`, `8n_v2`, `9c`) |
 | `--whisper-model` | `large-v3` | Whisper model size ([see here](https://github.com/SYSTRAN/faster-whisper?tab=readme-ov-file#whisper) for options) |
 | `--whisper-device` | `cuda` | Whisper device (`cuda`, `cpu`, `auto`) |
