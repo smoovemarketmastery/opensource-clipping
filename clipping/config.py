@@ -251,7 +251,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--source",
-        choices=["youtube", "tiktok", "instagram", "gdrive"],
+        choices=["youtube", "tiktok", "instagram", "gdrive", "twitch", "kick"],
         default=SOURCE_PLATFORM,
         help="Video source platform. Determines download behavior and subtitle availability.",
     )

@@ -54,6 +54,8 @@ _PLATFORM_LABELS = {
     "tiktok": "TikTok",
     "instagram": "Instagram",
     "gdrive": "Google Drive",
+    "twitch": "Twitch",
+    "kick": "Kick",
 }
 
 
