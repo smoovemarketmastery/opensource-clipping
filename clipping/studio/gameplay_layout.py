@@ -6,42 +6,33 @@
 
 The gameplay panel shows --gameplay-crop (default: whole frame), either
 "contain" (whole region, letterboxed over a blurred copy; keeps HUD and minimap)
-or "cover" (fills the panel, cropped at --gameplay-anchor).
+or "cover" (fills the panel, cropped). --gameplay-align-h/-v place the region
+inside the panel (contain) or pick the kept part (cover). Only the gameplay
+inside its panel moves; the panel itself has a fixed size, so the
+facecam + panel stack always fills the canvas exactly.
 
-Pure string building lives here so it is testable without OpenCV; cv2 and the
-watermark module are only touched inside render()/make_watermark_overlay().
+With a cam box, the copy of the facecam still inside the gameplay is masked
+(blur/darken) before scaling, so the streamer doesn't appear twice.
+
+Pure string building lives here so it is testable without OpenCV; cv2 and
+numpy are only imported inside make_watermark_overlay().
 """
 
 import os
 
 DEFAULT_CAM_SHARE = 0.35
-
-# Anchor -> fractional (x, y) position of the kept/placed area within the slack.
-ANCHORS = {
-    "center": (0.5, 0.5),
-    "top": (0.5, 0.0),
-    "bottom": (0.5, 1.0),
-    "left": (0.0, 0.5),
-    "right": (1.0, 0.5),
-}
-
-_warned_dev_mode = False
+ALIGN_H = {"left": 0.0, "center": 0.5, "right": 1.0}
+ALIGN_V = {"top": 0.0, "center": 0.5, "bottom": 1.0}
 
 
 def active_layout(cfg, rasio):
     """The layout to render with, or None. Single predicate for renderer and B-roll gating.
 
-    cfg may come from the Web/API adapter, which never sets the gameplay fields,
-    so every read goes through getattr with a None default.
+    Always returns None (never "", (), False) when no layout applies. cfg may come
+    from the Web/API adapter, which never sets the gameplay fields.
     """
-    global _warned_dev_mode
     layout = getattr(cfg, "gameplay_layout", None)
-    if not layout or rasio == "16:9":
-        return None
-    if getattr(cfg, "dev_mode", False):
-        if not _warned_dev_mode:
-            print("   ⚠️ --gameplay-layout is ignored in --dev-mode (dev output has its own fixed size).", flush=True)
-            _warned_dev_mode = True
+    if not layout or rasio == "16:9" or getattr(cfg, "dev_mode", False):
         return None
     return layout
 
@@ -55,9 +46,53 @@ def _crop_expr(box):
     return f"crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}"
 
 
-def _panel(src_pad, out_pad, pw, ph, crop, fit, anchor):
+def panel_size(layout, out_w, out_h, cam_share=DEFAULT_CAM_SHARE):
+    """(width, height) of the gameplay panel."""
+    if layout == "fit":
+        return out_w, out_h
+    return out_w, out_h - _even(out_h * cam_share)
+
+
+def idle_alignments(src_w, src_h, crop, panel_w, panel_h, fit, align_h, align_v):
+    """Alignment flags that can't move anything for this geometry (no slack on that axis)."""
+    cw, ch = (crop[2], crop[3]) if crop else (1.0, 1.0)
+    region = (src_w * cw) / (src_h * ch)
+    panel = panel_w / panel_h
+    if abs(region - panel) < 1e-3:
+        h_slack = v_slack = False
+    elif fit == "contain":
+        h_slack, v_slack = region < panel, region > panel
+    else:  # cover crops the overflowing axis
+        h_slack, v_slack = region > panel, region < panel
+    idle = []
+    if align_h != "center" and not h_slack:
+        idle.append(f"--gameplay-align-h {align_h}")
+    if align_v != "center" and not v_slack:
+        idle.append(f"--gameplay-align-v {align_v}")
+    return idle
+
+
+def _mask(src_pad, out_pad, cam, mode):
+    """Hide the facecam copy inside the gameplay source. Returns (chain, pad)."""
+    if not cam or mode == "none":
+        return "", src_pad
+    x, y, w, h = cam
+    if mode == "darken":
+        return (
+            f"[{src_pad}]drawbox=x=iw*{x}:y=ih*{y}:w=iw*{w}:h=ih*{h}:color=black@0.85:t=fill[{out_pad}];",
+            out_pad,
+        )
+    return (
+        f"[{src_pad}]split[{out_pad}_m][{out_pad}_c];"
+        f"[{out_pad}_c]{_crop_expr(cam)},boxblur=luma_radius=min(w\\,h)/6:luma_power=3[{out_pad}_b];"
+        f"[{out_pad}_m][{out_pad}_b]overlay=main_w*{x}:main_h*{y}[{out_pad}];",
+        out_pad,
+    )
+
+
+def _panel(src_pad, out_pad, pw, ph, crop, fit, align_h, align_v):
     """Filter chain turning [src_pad] into a pw x ph gameplay panel [out_pad]."""
-    ax, ay = ANCHORS[anchor]
+    ax, ay = ALIGN_H[align_h], ALIGN_V[align_v]
     pre = f"{_crop_expr(crop)}," if crop else ""
     if fit == "cover":
         return (
@@ -73,23 +108,29 @@ def _panel(src_pad, out_pad, pw, ph, crop, fit, anchor):
     )
 
 
-def build_filter(layout, out_w, out_h, *, crop=None, fit="contain", anchor="center",
-                 cam_share=DEFAULT_CAM_SHARE, watermark=False):
-    """FFmpeg filter_complex string ending in [v]. Input 0 = video, input 1 = watermark overlay (if any)."""
-    last = "v" if not watermark else "base"
+def build_filter(layout, out_w, out_h, *, crop=None, fit="contain", align_h="center",
+                 align_v="center", cam_share=DEFAULT_CAM_SHARE, mask_cam=None, watermark=False):
+    """FFmpeg filter_complex string ending in [v]. Input 0 = video, input 1 = watermark overlay.
+
+    mask_cam None means the default: blur when a cam box is given.
+    """
+    last = "base" if watermark else "v"
+    pw, ph = panel_size(layout, out_w, out_h, cam_share)
     if layout == "fit":
-        graph = _panel("0:v", last, out_w, out_h, crop, fit, anchor)
+        graph = _panel("0:v", last, pw, ph, crop, fit, align_h, align_v)
     else:
-        cam_h = _even(out_h * cam_share)
-        game_h = out_h - cam_h
+        cam_h = out_h - ph
+        mask_chain, game_pad = _mask("game_src", "game_masked", layout, mask_cam or "blur")
         graph = (
             f"[0:v]split[cam_src][game_src];"
             f"[cam_src]{_crop_expr(layout)},"
             f"scale={out_w}:{cam_h}:force_original_aspect_ratio=increase,crop={out_w}:{cam_h},setsar=1[cam];"
-            + _panel("game_src", "game", out_w, game_h, crop, fit, anchor)
+            + mask_chain
+            + _panel(game_pad, "game", pw, ph, crop, fit, align_h, align_v)
             + f";[cam][game]vstack[{last}]"
         )
     if watermark:
+        # The looped PNG is infinite; shortest=1 lets the main input end the clip.
         graph += ";[base][1:v]overlay=0:0:shortest=1[v]"
     return graph
 
@@ -97,9 +138,9 @@ def build_filter(layout, out_w, out_h, *, crop=None, fit="contain", anchor="cent
 def make_watermark_overlay(apply_watermark, cfg, out_w, out_h, path):
     """Render the configured watermark to a transparent full-canvas PNG.
 
-    Reuses the frame renderer's own apply_watermark, so position, padding,
-    scale and opacity match the other render modes exactly. Alpha is recovered
-    by rendering onto black and white canvases.
+    apply_watermark takes and returns OpenCV BGR frames and depends only on cfg
+    and the canvas size, so rendering onto black and white canvases recovers
+    alpha exactly. The result is written with cv2 as BGRA, keeping BGR order.
     """
     import cv2
     import numpy as np
@@ -114,21 +155,27 @@ def make_watermark_overlay(apply_watermark, cfg, out_w, out_h, path):
     return path
 
 
+def options(cfg):
+    """Gameplay options from cfg, with defaults for anything missing (Web/API cfg)."""
+    return {
+        "crop": getattr(cfg, "gameplay_crop", None),
+        "fit": getattr(cfg, "gameplay_fit", None) or "contain",
+        "align_h": getattr(cfg, "gameplay_align_h", None) or "center",
+        "align_v": getattr(cfg, "gameplay_align_v", None) or "center",
+        "cam_share": getattr(cfg, "gameplay_cam_share", None) or DEFAULT_CAM_SHARE,
+        "mask_cam": getattr(cfg, "gameplay_mask_cam", None),
+    }
+
+
 def render(input_video, output_video, start, end, layout, out_w, out_h, cfg, *,
            encode_args, run_ffmpeg, watermark_png=None, label="Gameplay"):
     """Render a silent clip with the layout (same output contract as buat_video_hybrid).
 
-    encode_args: list of FFmpeg output encode args (codec, pix_fmt, fps).
-    run_ffmpeg: callable(cmd, duration, label) that runs and reports progress.
+    encode_args: FFmpeg output encode args (codec, pix_fmt, fps).
+    run_ffmpeg: callable(cmd, duration, label); cmd has no output path yet.
+    Only -filter_complex is used (never -vf), so the graph owns every stream.
     """
-    graph = build_filter(
-        layout, out_w, out_h,
-        crop=getattr(cfg, "gameplay_crop", None),
-        fit=getattr(cfg, "gameplay_fit", "contain") or "contain",
-        anchor=getattr(cfg, "gameplay_anchor", "center") or "center",
-        cam_share=getattr(cfg, "gameplay_cam_share", None) or DEFAULT_CAM_SHARE,
-        watermark=bool(watermark_png),
-    )
+    graph = build_filter(layout, out_w, out_h, watermark=bool(watermark_png), **options(cfg))
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-ss", str(start), "-to", str(end), "-i", input_video]
     if watermark_png:

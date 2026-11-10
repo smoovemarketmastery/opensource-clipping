@@ -44,11 +44,19 @@ def test_flags_parse_with_defaults(cli):
     cfg = cli("--gameplay-layout", "0.75,0.70,0.25,0.30", "--source-section", "1:00:00-1:00:30")
     assert cfg.gameplay_layout == (0.75, 0.70, 0.25, 0.30)
     assert cfg.source_section == (3600.0, 3630.0)
-    assert (cfg.gameplay_crop, cfg.gameplay_fit, cfg.gameplay_anchor, cfg.gameplay_cam_share) == (
-        None, "contain", "center", 0.35)
-    assert cli("--gameplay-layout", "FIT").gameplay_layout == "fit"
+    assert (cfg.gameplay_crop, cfg.gameplay_fit, cfg.gameplay_align_h, cfg.gameplay_align_v,
+            cfg.gameplay_cam_share, cfg.gameplay_mask_cam) == (None, "contain", "center", "center", 0.35, "blur")
+    fit = cli("--gameplay-layout", "FIT")
+    assert fit.gameplay_layout == "fit" and fit.gameplay_mask_cam == "none"
+    assert cli("--gameplay-layout", "0.75,0.70,0.25,0.30", "--gameplay-mask-cam", "darken").gameplay_mask_cam == "darken"
     off = cli()
     assert off.gameplay_layout is None and off.source_section is None
+
+
+def test_dev_mode_warning_is_per_config_not_per_process(cli, capsys):
+    for _ in range(2):  # e.g. two jobs in one long-lived process
+        cli("--gameplay-layout", "fit", "--dev-mode")
+        assert "ignored in --dev-mode" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("args", [
@@ -61,6 +69,15 @@ def test_flags_parse_with_defaults(cli):
     ["--source-section", "abc"],
     ["--gameplay-layout", "fit", "--split-screen"],
     ["--gameplay-layout", "fit", "--camera-switch"],
+    # Axis/value mismatch and removed single-anchor flag.
+    ["--gameplay-layout", "fit", "--gameplay-align-h", "top"],
+    ["--gameplay-layout", "fit", "--gameplay-align-v", "left"],
+    ["--gameplay-layout", "fit", "--gameplay-anchor", "left"],
+    # Mask needs a cam box; sub-options need a layout.
+    ["--gameplay-layout", "fit", "--gameplay-mask-cam", "blur"],
+    ["--gameplay-fit", "cover"],
+    ["--gameplay-align-v", "top"],
+    ["--gameplay-mask-cam", "none"],
 ])
 def test_invalid_values_and_conflicts_are_parser_errors(cli, args):
     with pytest.raises(SystemExit) as exc:
@@ -81,6 +98,19 @@ def test_active_layout_predicate():
     assert gl.active_layout(on, "16:9") is None
     assert gl.active_layout(SimpleNamespace(gameplay_layout="fit", dev_mode=True), "9:16") is None
     assert gl.active_layout(SimpleNamespace(), "9:16") is None  # Web/API cfg has no gameplay fields
+    for empty in ("", (), False, None):
+        assert gl.active_layout(SimpleNamespace(gameplay_layout=empty), "9:16") is None
+
+
+def test_idle_alignment_is_reported_per_axis():
+    # 16:9 source into a 1080x1248 panel: contain has only vertical slack, cover only horizontal.
+    assert gl.idle_alignments(1920, 1080, None, 1080, 1248, "contain", "left", "top") == [
+        "--gameplay-align-h left"]
+    assert gl.idle_alignments(1920, 1080, None, 1080, 1248, "cover", "left", "top") == [
+        "--gameplay-align-v top"]
+    assert gl.idle_alignments(1920, 1080, None, 1080, 1248, "contain", "center", "bottom") == []
+    # A tall crop flips it: contain now has horizontal slack.
+    assert gl.idle_alignments(1920, 1080, (0, 0, 0.2, 1), 1080, 1248, "contain", "right", "center") == []
 
 
 # --- Filter graph ---------------------------------------------------------------
@@ -91,10 +121,27 @@ def test_contain_is_default_and_keeps_whole_frame():
     assert "boxblur" in graph and graph.endswith("[v]")
 
 
-def test_cover_crops_at_anchor():
-    graph = gl.build_filter("fit", 1080, 1920, fit="cover", anchor="left")
-    assert "force_original_aspect_ratio=increase" in graph
-    assert "crop=1080:1920:(iw-1080)*0.0:(ih-1920)*0.5" in graph
+def test_alignment_moves_gameplay_inside_fixed_panel():
+    cover = gl.build_filter("fit", 1080, 1920, fit="cover", align_h="left", align_v="bottom")
+    assert "force_original_aspect_ratio=increase" in cover
+    assert "crop=1080:1920:(iw-1080)*0.0:(ih-1920)*1.0" in cover
+    contain = gl.build_filter((0.75, 0.7, 0.25, 0.3), 1080, 1920, align_v="top")
+    assert "overlay=(W-w)*0.5:(H-h)*0.0" in contain
+    # Panel size is fixed regardless of alignment, so cam + panel always fill the canvas.
+    assert "crop=1080:672" in contain and "scale=1080:1248:" in contain  # 672 + 1248 = 1920
+
+
+def test_cam_mask_modes():
+    cam = (0.75, 0.7, 0.25, 0.3)
+    blur = gl.build_filter(cam, 1080, 1920)  # default = blur
+    assert "[game_src]split[game_masked_m][game_masked_c]" in blur
+    assert "boxblur=luma_radius=min(w\\,h)/6" in blur
+    assert "overlay=main_w*0.75:main_h*0.7[game_masked]" in blur
+    assert "drawbox=x=iw*0.75:y=ih*0.7:w=iw*0.25:h=ih*0.3:color=black@0.85:t=fill" in gl.build_filter(
+        cam, 1080, 1920, mask_cam="darken")
+    none = gl.build_filter(cam, 1080, 1920, mask_cam="none")
+    assert "game_masked" not in none and "[game_src]split[game_s1]" in none
+    assert "game_masked" not in gl.build_filter("fit", 1080, 1920)
 
 
 def test_facecam_share_crop_and_watermark():
@@ -111,8 +158,8 @@ def test_facecam_share_crop_and_watermark():
 def test_web_payload_cfg_renders_without_new_flags(monkeypatch, tmp_path):
     from web.api.config_adapter import build_config_from_payload
     cfg = build_config_from_payload({"url": "https://example.test/v", "ratio": "9:16"}, "job-gameplay")
-    for name in ("gameplay_layout", "gameplay_crop", "gameplay_fit", "gameplay_anchor",
-                 "gameplay_cam_share", "source_section"):
+    for name in ("gameplay_layout", "gameplay_crop", "gameplay_fit", "gameplay_align_h",
+                 "gameplay_align_v", "gameplay_cam_share", "gameplay_mask_cam", "source_section"):
         assert not hasattr(cfg, name)
     assert gl.active_layout(cfg, "9:16") is None
 
@@ -152,6 +199,38 @@ def test_web_payload_cfg_renders_without_new_flags(monkeypatch, tmp_path):
     with pytest.raises(Stop):
         runner.run_pipeline(cfg)
     assert "source_section" in seen and seen["source_section"] is None
+
+
+# --- Engine: --source-section on an existing source ----------------------------
+
+def _engine(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=None))
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=None))
+    spec = importlib.util.spec_from_file_location("test_gameplay_engine", ROOT / "clipping" / "engine.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_section_on_cached_source_is_loud_noop(monkeypatch, tmp_path, capsys):
+    engine = _engine(monkeypatch)
+    cached = tmp_path / "video_asli.mp4"
+    cached.write_bytes(b"not a real video")
+    engine._warn_section_cached(str(cached), (7200.0, 7230.0))
+    out = capsys.readouterr().out
+    assert "--source-section 7200-7230s NOT APPLIED" in out
+    assert str(cached) in out and "--cleanup-source" in out and "!" * 70 in out
+
+
+def test_section_length_mismatch_warns(monkeypatch, capsys):
+    engine = _engine(monkeypatch)
+    monkeypatch.setattr(engine, "_probe_duration", lambda path: 38.0)
+    engine._report_section_duration("x.mp4", (7200.0, 7230.0))
+    out = capsys.readouterr().out
+    assert "Section length: 38.0s (requested 30.0s)" in out and "approximate" in out
+    monkeypatch.setattr(engine, "_probe_duration", lambda path: 30.4)
+    engine._report_section_duration("x.mp4", (7200.0, 7230.0))
+    assert "approximate" not in capsys.readouterr().out
 
 
 # --- Real renders (need ffmpeg + OpenCV + NumPy + Pillow) ----------------------
@@ -213,3 +292,42 @@ def test_watermark_is_burned_in(tmp_path, source):
     assert abs(marked[near].astype(int) - plain[near].astype(int)).mean() > 5
     far = (slice(1500, 1900), slice(300, 800))
     assert abs(marked[far].astype(int) - plain[far].astype(int)).mean() < 2
+
+
+@render_deps
+def test_colored_image_watermark_keeps_bgr_order(tmp_path, source):
+    from PIL import Image
+    red = tmp_path / "red.png"
+    Image.new("RGBA", (200, 200), (255, 0, 0, 255)).save(red)  # pure red, RGB
+    wm_mod = _load("watermark.py", "test_gameplay_watermark_color_mod")
+    cfg = SimpleNamespace(watermark_enabled=True, watermark_text=None, watermark_image=str(red),
+                          watermark_opacity=100, watermark_position="center", watermark_padding=0,
+                          watermark_font_size=0, watermark_scale=20)
+    png = gl.make_watermark_overlay(wm_mod.apply_watermark, cfg, 1080, 1920, str(tmp_path / "wm.png"))
+    import cv2
+    b, g, r, a = cv2.imread(png, cv2.IMREAD_UNCHANGED)[960, 540]
+    assert (b, g, r, a) == (0, 0, 255, 255)
+    _, _, frame = _render(source, tmp_path / "wm.mp4", "fit", SimpleNamespace(), wm=png)
+    b, g, r = frame[900:1020, 480:600].reshape(-1, 3).mean(axis=0)
+    assert r > 200 and g < 50 and b < 50, (b, g, r)
+
+
+@render_deps
+def test_cam_mask_changes_only_the_duplicate(tmp_path, source):
+    cam = (0.75, 0.7, 0.25, 0.3)
+    _, _, unmasked = _render(source, tmp_path / "none.mp4", cam, SimpleNamespace(gameplay_mask_cam="none"))
+    _, _, blurred = _render(source, tmp_path / "blur.mp4", cam, SimpleNamespace(gameplay_mask_cam="blur"))
+    diff = abs(blurred.astype(int) - unmasked.astype(int)).mean(axis=2)
+    assert diff[:672].mean() < 1                    # facecam itself is untouched
+    # Contain: 1920x1080 -> 1080x608 inside the 1248-tall panel, centered (top 320).
+    # The cam copy sits at x 75-100%, y 70-100% of that image.
+    copy = diff[672 + 320 + int(608 * 0.72):672 + 320 + 606, 1080 * 3 // 4 + 10:1070]
+    assert copy.mean() > 5
+
+
+@render_deps
+def test_top_aligned_contain_still_fills_the_stack(tmp_path, source):
+    dims, _, frame = _render(source, tmp_path / "top.mp4", (0.75, 0.7, 0.25, 0.3),
+                             SimpleNamespace(gameplay_align_v="top"))
+    assert dims == (1080, 1920)
+    assert frame[-60:].mean() > 20  # bottom of the panel is the blurred fill, not an empty bar

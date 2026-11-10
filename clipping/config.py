@@ -574,21 +574,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--gameplay-fit",
         choices=["contain", "cover"],
-        default="contain",
+        default=None,
         help="contain = show the whole gameplay region over a blurred copy (keeps HUD/minimap). "
              "cover = fill the panel and crop the overflow. Default: contain.",
     )
     p.add_argument(
-        "--gameplay-anchor",
-        choices=["center", "top", "bottom", "left", "right"],
-        default="center",
-        help="Where gameplay sits in its panel (contain) or which side is kept (cover). Default: center.",
+        "--gameplay-align-h",
+        choices=["left", "center", "right"],
+        default=None,
+        help="Horizontal placement of the gameplay in its panel (contain) or kept side (cover). "
+             "Only moves anything when that axis has slack; a warning says when it doesn't. Default: center.",
+    )
+    p.add_argument(
+        "--gameplay-align-v",
+        choices=["top", "center", "bottom"],
+        default=None,
+        help="Vertical placement of the gameplay in its panel (contain) or kept side (cover). "
+             "Only moves anything when that axis has slack; a warning says when it doesn't. Default: center.",
     )
     p.add_argument(
         "--gameplay-cam-share",
         type=_parse_cam_share,
-        default=0.35,
+        default=None,
         help="Fraction of output height used by the facecam (0.1-0.7). Default: 0.35.",
+    )
+    p.add_argument(
+        "--gameplay-mask-cam",
+        choices=["blur", "darken", "none"],
+        default=None,
+        help="Hide the duplicate facecam inside the gameplay. Default: blur when a facecam box is given.",
     )
 
     # --- Smart Auto-Framing / Tracking ---
@@ -877,6 +891,15 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
 
     if args.gameplay_layout and (args.split_screen or args.camera_switch):
         parser.error("--gameplay-layout cannot be combined with --split-screen or --camera-switch.")
+    gameplay_opts = (args.gameplay_crop, args.gameplay_fit, args.gameplay_align_h,
+                     args.gameplay_align_v, args.gameplay_cam_share, args.gameplay_mask_cam)
+    if not args.gameplay_layout and any(v is not None for v in gameplay_opts):
+        parser.error("--gameplay-* options need --gameplay-layout.")
+    if args.gameplay_layout == "fit" and args.gameplay_mask_cam in ("blur", "darken"):
+        parser.error("--gameplay-mask-cam needs a facecam box; --gameplay-layout fit has none.")
+    if args.gameplay_layout and args.dev_mode:
+        print("⚠️ --gameplay-layout is ignored in --dev-mode (dev output has its own fixed size).", flush=True)
+    has_cam_box = isinstance(args.gameplay_layout, tuple)
 
     # Normalize URL list for batch support
     url_list = args.url if isinstance(args.url, list) else ([args.url] if args.url else [])
@@ -1030,9 +1053,11 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         static_crop=args.static_crop,
         gameplay_layout=args.gameplay_layout,
         gameplay_crop=args.gameplay_crop,
-        gameplay_fit=args.gameplay_fit,
-        gameplay_anchor=args.gameplay_anchor,
-        gameplay_cam_share=args.gameplay_cam_share,
+        gameplay_fit=args.gameplay_fit or "contain",
+        gameplay_align_h=args.gameplay_align_h or "center",
+        gameplay_align_v=args.gameplay_align_v or "center",
+        gameplay_cam_share=args.gameplay_cam_share or 0.35,
+        gameplay_mask_cam=args.gameplay_mask_cam or ("blur" if has_cam_box else "none"),
         source_section=args.source_section,
         # Story Clip Mode
         story_mode=args.story_mode,

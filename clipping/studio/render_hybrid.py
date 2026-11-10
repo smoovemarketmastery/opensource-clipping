@@ -124,13 +124,29 @@ def buat_video_hybrid(
         fps_g = cap_g.get(cv2.CAP_PROP_FPS) or 30
         cap_g.release()
         out_w_g, out_h_g = _get_render_dims(cfg, rasio, source_h=src_h_g)
+        opts_g = _gameplay.options(cfg)
+        idle = _gameplay.idle_alignments(
+            src_w_g, src_h_g, opts_g["crop"],
+            *_gameplay.panel_size(gameplay, out_w_g, out_h_g, opts_g["cam_share"]),
+            opts_g["fit"], opts_g["align_h"], opts_g["align_v"],
+        )
+        if idle:
+            print(f"   ⚠️ {label} - {', '.join(idle)} has no effect: no slack on that axis "
+                  f"with --gameplay-fit {opts_g['fit']} for this source.", flush=True)
         wm_png = None
         if getattr(cfg, "watermark_enabled", False):
+            import tempfile
             _wm_mod = _load_studio_internal_module("watermark.py", "clipping_studio_watermark")
-            wm_png = os.path.splitext(output_video)[0] + "_wm.png"
-            _gameplay.make_watermark_overlay(_wm_mod.apply_watermark, cfg, out_w_g, out_h_g, wm_png)
+            # Unique per render: concurrent renders in the same cwd must not share the overlay.
+            fd, wm_png = tempfile.mkstemp(
+                prefix=os.path.splitext(os.path.basename(output_video))[0] + "_wm_",
+                suffix=".png", dir=os.path.dirname(os.path.abspath(output_video)),
+            )
+            os.close(fd)
         print(f"🎮 {label} - Gameplay layout ({'fit' if gameplay == 'fit' else 'facecam'})...", flush=True)
         try:
+            if wm_png:
+                _gameplay.make_watermark_overlay(_wm_mod.apply_watermark, cfg, out_w_g, out_h_g, wm_png)
             _gameplay.render(
                 input_video, output_video, start_clip, end_clip, gameplay, out_w_g, out_h_g, cfg,
                 encode_args=get_mp4_encode_args(video_encoder, fps_g),

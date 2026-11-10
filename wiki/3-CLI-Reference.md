@@ -140,7 +140,9 @@ Complete reference for all command-line arguments. Run `python main.py --help` f
 | `--gameplay-layout` | `None` | Gaming layout for non-16:9 ratios. `x,y,w,h` = facecam box (source fractions), stacked above the gameplay. `fit` = no facecam. Replaces face tracking and skips B-roll. Ignored in `--dev-mode`. Cannot combine with `--split-screen`/`--camera-switch` |
 | `--gameplay-crop` | `None` | Source region used as gameplay (`x,y,w,h` fractions), e.g. to exclude an overlaid facecam or chat. Default: whole frame |
 | `--gameplay-fit` | `contain` | `contain` shows the whole gameplay region over a blurred copy (keeps HUD/minimap). `cover` fills the panel and crops the overflow |
-| `--gameplay-anchor` | `center` | Gameplay placement in its panel (`contain`) or kept side (`cover`): `center`, `top`, `bottom`, `left`, `right` |
+| `--gameplay-align-h` | `center` | `left`, `center`, `right`. Moves the gameplay inside its panel (`contain`) or picks the kept part (`cover`). Warns when that axis has no slack |
+| `--gameplay-align-v` | `center` | `top`, `center`, `bottom`. Same as above for the vertical axis. The panel size is fixed, so the stack always fills the frame |
+| `--gameplay-mask-cam` | `blur` with a cam box | `blur`, `darken` or `none`. Hides the copy of the facecam that is still inside the gameplay |
 | `--gameplay-cam-share` | `0.35` | Fraction of output height used by the facecam (0.1-0.7) |
 
 ---

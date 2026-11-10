@@ -200,7 +200,7 @@ def download_video(
 
     if source_section and os.path.exists(output_path):
         # yt-dlp reuses an existing file as-is, so the section can't be re-applied.
-        print("      ℹ️ --source-section ignored: using the existing source file as-is.", flush=True)
+        _warn_section_cached(output_path, source_section)
         source_section = None
     if source_section:
         from yt_dlp.utils import download_range_func
@@ -260,17 +260,43 @@ def download_video(
         _report_section_duration(output_path, source_section)
 
 
-def _report_section_duration(path: str, section: tuple[float, float]) -> None:
-    """Log the real duration of a section download and warn when it differs from the request."""
-    requested = section[1] - section[0]
+def _probe_duration(path: str) -> float | None:
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=30, check=True,
         ).stdout.strip()
-        actual = float(out)
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        print(f"      ⚠️ Could not measure section length ({e}).", flush=True)
+        return float(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _warn_section_cached(path: str, section: tuple[float, float]) -> None:
+    """Loud notice: an existing source file wins over --source-section."""
+    actual = _probe_duration(path)
+    length = f"{actual:.0f}s" if actual is not None else "unknown length"
+    bar = "!" * 70
+    lines = [
+        "",
+        bar,
+        f"⚠️  --source-section {section[0]:.0f}-{section[1]:.0f}s NOT APPLIED.",
+        f"    Reusing existing source file ({length}): {path}",
+        "    It may be the full VOD or a different section.",
+        "    To apply this section, delete that file and rerun.",
+        "    --cleanup-source deletes it only after a successful run, so a failed or",
+        "    interrupted run leaves it behind for the next run to reuse.",
+        bar,
+        "",
+    ]
+    print("\n".join(lines), flush=True)
+
+
+def _report_section_duration(path: str, section: tuple[float, float]) -> None:
+    """Log the real duration of a section download and warn when it differs from the request."""
+    requested = section[1] - section[0]
+    actual = _probe_duration(path)
+    if actual is None:
+        print("      ⚠️ Could not measure section length (ffprobe failed).", flush=True)
         return
     print(f"      ✂️ Section length: {actual:.1f}s (requested {requested:.1f}s)", flush=True)
     if abs(actual - requested) > 1.0:
