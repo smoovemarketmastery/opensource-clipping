@@ -400,6 +400,9 @@ def _validated_record(raw):
         if len(section) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in section):
             raise ValueError("sidecar field 'section' must be [start, end]")
         section = [round(float(x), 3) for x in section]
+        # Also rejects NaN (every comparison is False) and infinite ends.
+        if not (0 <= section[0] < section[1] < float("inf")):
+            raise ValueError("sidecar field 'section' must satisfy 0 <= start < end")
     duration = opt("actual_duration", (int, float))
     url = opt("url", str)
     return {

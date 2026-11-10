@@ -481,6 +481,21 @@ def test_id_match_remembers_the_new_spelling(monkeypatch, tmp_path):
     assert instances == []
 
 
+@pytest.mark.parametrize("bad_section", [[9000, 7200], [7200, 7200], [-5, 10], [0, float("inf")],
+                                         [float("nan"), 10]])
+def test_out_of_order_or_out_of_range_section_is_malformed(monkeypatch, tmp_path, capsys, bad_section):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    out.write_text("cached", encoding="utf-8")
+    (tmp_path / "video_asli.source.json").write_text(json.dumps(
+        {"source_key": "TwitchVod:v1", "url": URL, "normalized_urls": [URL], "section": bad_section}),
+        encoding="utf-8")
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(9000.0, 9030.0))
+    printed = capsys.readouterr().out
+    assert len(downloads) == 1 and "record is malformed" in printed and "9000-7200s" not in printed
+
+
 def test_known_urls_are_capped(monkeypatch, tmp_path):
     engine = _engine(monkeypatch)
     out = tmp_path / "video_asli.mp4"
