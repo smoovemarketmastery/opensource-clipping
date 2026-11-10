@@ -290,11 +290,18 @@ def test_every_clipping_module_imports(module, isolated_modules, monkeypatch, tm
 
 # --- Engine: source cache keyed to the request ---------------------------------
 
-def _engine(monkeypatch, downloads=None, fail=None):
-    """engine.py with a fake yt-dlp. `fail` (a list) makes the next download raise mid-way."""
+def _engine(monkeypatch, downloads=None, fail=None, instances=None, offline=None):
+    """engine.py with a fake yt-dlp.
+
+    fail (list): the next download raises mid-way. instances (list): records the
+    opts of every YoutubeDL created. offline (list): while non-empty, every
+    yt-dlp network call raises.
+    """
     class FakeYDL:
         def __init__(self, opts):
             self.opts = opts
+            if instances is not None:
+                instances.append(opts)
 
         def __enter__(self):
             return self
@@ -303,10 +310,16 @@ def _engine(monkeypatch, downloads=None, fail=None):
             return False
 
         def extract_info(self, url, download=False):
-            vid = url.split("/videos/")[1].split("?")[0]  # like yt-dlp: id ignores query params
+            if offline:
+                raise RuntimeError("Unable to download JSON metadata: offline")
+            vid = url.rstrip("/").split("/")[-1].split("?")[0]  # like yt-dlp: id ignores query params
             return {"height": 1080, "vcodec": "avc1", "extractor_key": "TwitchVod", "id": "v" + vid}
 
         def download(self, urls):
+            if offline:
+                raise RuntimeError("offline")
+            if self.opts.get("skip_download"):
+                return  # subtitle-only pass
             out = Path(self.opts["outtmpl"])
             if out.exists():
                 return  # real yt-dlp skips an existing file
@@ -344,7 +357,7 @@ def test_same_length_sections_do_not_share_the_cache(monkeypatch, tmp_path, caps
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
     assert downloads == [[(100.0, 130.0)], [(500.0, 530.0)]]
     assert "(500.0, 530.0)" in out.read_text(encoding="utf-8")
-    assert _sidecar(tmp_path) == {"source_key": "TwitchVod:v1", "url": URL,
+    assert _sidecar(tmp_path) == {"source_key": "TwitchVod:v1", "url": URL, "normalized_url": URL,
                                   "section": [500.0, 530.0], "actual_duration": 38.0}
     assert "holds section 100-130s" in capsys.readouterr().out
     assert not (tmp_path / "video_asli.download.mp4").exists()
@@ -379,6 +392,73 @@ def test_cache_reuse_rules(monkeypatch, tmp_path):
     out.write_bytes(b"")
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
     assert len(downloads) == 5
+
+
+def test_same_url_cache_hit_needs_no_network(monkeypatch, tmp_path):
+    instances, offline = [], []
+    engine = _engine(monkeypatch, instances=instances, offline=offline)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    before = out.read_text(encoding="utf-8")
+    offline.append(True)   # no connection / rate limited: any yt-dlp call would raise
+    instances.clear()
+    for url in (URL, URL + "?t=1h2m&utm_source=x#chat"):  # normalized URL matches offline
+        engine.download_video(url, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert instances == [] and out.read_text(encoding="utf-8") == before
+
+
+def test_different_url_spelling_falls_back_to_extractor_id(monkeypatch, tmp_path):
+    downloads, instances = [], []
+    engine = _engine(monkeypatch, downloads, instances=instances)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    instances.clear()
+    engine.download_video("https://twitch.tv/videos/1/", str(out), source_platform="twitch",
+                          source_section=(100.0, 130.0))  # no www: URL differs, same video id
+    assert len(downloads) == 1 and len(instances) == 1  # one metadata call, no media download
+
+
+def test_section_never_runs_the_subtitle_pass(monkeypatch, tmp_path):
+    instances = []
+    engine = _engine(monkeypatch, instances=instances)
+    engine.download_video("https://www.youtube.com/watch?v=abc", str(tmp_path / "video_asli.mp4"),
+                          use_dlp_subs=True, source_platform="youtube", source_section=(100.0, 130.0))
+    assert instances and not any(o.get("skip_download") or o.get("writesubtitles") for o in instances)
+    # Control: without a section the subtitle pass does run.
+    instances.clear()
+    engine.download_video("https://www.youtube.com/watch?v=def", str(tmp_path / "full.mp4"),
+                          use_dlp_subs=True, source_platform="youtube")
+    assert any(o.get("writesubtitles") for o in instances)
+
+
+def test_runner_does_not_request_subtitles_for_a_section(monkeypatch, cli):
+    cfg = cli("--use-dlp-subs", "--source-section", "100-130")
+    import clipping
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def download(*args, **kwargs):
+        seen.append(args[2])  # use_dlp_subs, positional
+        raise Stop
+
+    fake_engine = SimpleNamespace(download_video=download)
+    monkeypatch.setattr(clipping, "engine", fake_engine, raising=False)
+    monkeypatch.setitem(sys.modules, "clipping.engine", fake_engine)
+    for name in ("metadata", "studio", "diarization", "hook_manager", "voiceover"):
+        stub = SimpleNamespace()
+        monkeypatch.setattr(clipping, name, stub, raising=False)
+        monkeypatch.setitem(sys.modules, f"clipping.{name}", stub)
+    monkeypatch.delitem(sys.modules, "clipping.runner", raising=False)
+    monkeypatch.delattr(clipping, "runner", raising=False)  # package attr survives the delitem
+    from clipping import runner
+    with pytest.raises(Stop):
+        runner.run_pipeline(cfg)
+    cfg.source_section = None
+    with pytest.raises(Stop):
+        runner.run_pipeline(cfg)
+    assert seen == [False, True]
 
 
 def test_three_section_spellings_share_one_cache_entry(monkeypatch, tmp_path, cli):

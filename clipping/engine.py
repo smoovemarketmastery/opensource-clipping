@@ -240,6 +240,12 @@ def download_video(
     elif use_dlp_subs and not uses_youtube_format:
         print(f"      ℹ️ {platform_label} tidak menyediakan subtitle otomatis. Whisper akan digunakan.")
 
+    # Offline cache hit first: same normalized URL and section needs no network at all
+    # (re-running analysis without a connection or under rate limiting).
+    url_key = _normalize_url(url)
+    if _cache_matches(output_path, source_section, url_key=url_key, quiet=True):
+        return
+
     # Jalankan download video terpisah dari urusan subtitle
     info = None
     with YoutubeDL(ydl_opts) as ydl:
@@ -252,8 +258,9 @@ def download_video(
         except Exception as e:
             print(f"      ⚠️ Gagal mengecek info detail: {e}", flush=True)
 
+    # Different URL spelling for the same video (?t=, tracking params): match on extractor id.
     source_key = _source_key(url, info)
-    if _cache_matches(output_path, source_key, source_section):
+    if _cache_matches(output_path, source_section, source_key=source_key):
         return
 
     # Download to a temp file and swap it in only on success, so a failed or
@@ -285,7 +292,7 @@ def download_video(
     if os.path.exists(_sidecar_path(output_path)):
         os.remove(_sidecar_path(output_path))
     os.replace(tmp_path, output_path)
-    _write_source_sidecar(output_path, source_key, url, source_section, actual)
+    _write_source_sidecar(output_path, source_key, url, url_key, source_section, actual)
 
 
 def _probe_duration(path: str) -> float | None:
@@ -310,6 +317,21 @@ def _source_key(url, info):
     return url
 
 
+_TRACKING_PARAMS = {"t", "start", "si", "feature", "fbclid", "gclid", "ref", "pp"}
+
+
+def _normalize_url(url):
+    """URL without fragment, timestamp or tracking params, query sorted. Identity params like ?v= stay."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url.strip())
+    query = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+    )
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"),
+                       urlencode(query), ""))
+
+
 def _normalize_section(section):
     """(start, end) as floats, or None. Sections arrive pre-parsed, so every spelling of a range matches."""
     if not section:
@@ -317,11 +339,12 @@ def _normalize_section(section):
     return [round(float(section[0]), 3), round(float(section[1]), 3)]
 
 
-def _write_source_sidecar(video_path, source_key, url, section, actual_duration):
+def _write_source_sidecar(video_path, source_key, url, url_key, section, actual_duration):
     """Record what the cached source contains (atomically), so a later run can tell if it matches."""
     data = {
         "source_key": source_key,
         "url": url,
+        "normalized_url": url_key,
         "section": _normalize_section(section),
         "actual_duration": actual_duration,
     }
@@ -345,13 +368,16 @@ def _read_sidecar(video_path):
         return {}
 
 
-def _cache_matches(video_path, source_key, section):
+def _cache_matches(video_path, section, *, url_key=None, source_key=None, quiet=False):
     """True when the cached source can be reused for this request.
 
+    Identity is checked by normalized URL (url_key, no network needed) or by
+    extractor id (source_key, needs a metadata call); pass exactly one.
     Gates, in order: the file exists and is non-empty; the sidecar records the
     same source and section; the file's length still matches what was recorded.
     A legacy file with no sidecar is reused only for a full-video request, as
     before. Anything else is replaced, but only after the new download succeeds.
+    quiet=True suppresses the mismatch banner (used for the offline first check).
     """
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return False
@@ -363,7 +389,8 @@ def _cache_matches(video_path, source_key, section):
         reason = "no record of what it contains"
     elif not cached:
         reason = "its record is unreadable"
-    elif cached.get("source_key", cached.get("url")) != source_key:
+    elif (cached.get("normalized_url") != url_key if source_key is None
+          else cached.get("source_key", cached.get("url")) != source_key):
         reason = f"it holds a different video ({cached.get('url')})"
     elif cached.get("section") != _normalize_section(section):
         had = cached.get("section")
@@ -374,8 +401,11 @@ def _cache_matches(video_path, source_key, section):
         if recorded and current is not None and abs(current - recorded) > 1.0:
             reason = f"its length changed from {recorded:.1f}s to {current:.1f}s (truncated?)"
     if reason is None:
-        print("      ♻️ Reusing cached source (matches source and section).", flush=True)
+        how = "url" if source_key is None else "video id"
+        print(f"      ♻️ Reusing cached source (matches {how} and section).", flush=True)
         return True
+    if quiet:
+        return False
     bar = "!" * 70
     lines = [
         "", bar,
