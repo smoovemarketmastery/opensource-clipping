@@ -54,6 +54,7 @@ broll = _load_studio_internal_module("broll.py", "clipping_studio_broll")
 crop_center_broll = broll.crop_center_broll
 face_detection = _load_studio_internal_module("face_detection.py", "clipping_studio_face_detection")
 get_face_detector = face_detection.get_face_detector
+_gameplay = _load_studio_internal_module("gameplay_layout.py", "clipping_studio_gameplay_layout")
 
 def buat_video_hybrid(
     input_video,
@@ -114,6 +115,24 @@ def buat_video_hybrid(
     # =======================================================
 
     video_encoder = detect_video_encoder(cfg)
+
+    gameplay = getattr(cfg, "gameplay_layout", None)
+    if gameplay and rasio != "16:9":
+        if broll_data or getattr(cfg, "watermark_enabled", False):
+            print(f"   ⚠️ {label} - Gameplay layout ignores B-roll and watermark.", flush=True)
+        cap_g = cv2.VideoCapture(input_video)
+        src_w_g = cap_g.get(cv2.CAP_PROP_FRAME_WIDTH)
+        src_h_g = int(cap_g.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap_g.release()
+        out_w_g, out_h_g = _get_render_dims(cfg, rasio, source_h=src_h_g)
+        print(f"🎮 {label} - Gameplay layout ({'fit' if gameplay == 'fit' else 'facecam'})...", flush=True)
+        _gameplay.render(
+            input_video, output_video, start_clip, end_clip, gameplay, out_w_g, out_h_g,
+            get_mp4_encode_args, video_encoder, build_ffmpeg_progress_cmd,
+            run_ffmpeg_with_progress, label,
+        )
+        print(f"✅ {label} selesai.", flush=True)
+        return lambda t: src_w_g / 2
 
     yolo_model = None
     detector = None

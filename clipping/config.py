@@ -221,6 +221,19 @@ def _parse_download_height(val: str) -> str | int:
         raise argparse.ArgumentTypeError("Download source height must be a positive integer.")
     return parsed
 
+def _parse_gameplay_layout(val: str):
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "studio", "gameplay_layout.py")
+    spec = importlib.util.spec_from_file_location("clipping_studio_gameplay_layout", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    parse_layout = mod.parse_layout
+    try:
+        return parse_layout(val)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="🎬 OpenSource Clipping — AI Auto-Clipper & Teaser Generator",
@@ -498,6 +511,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--static-crop",
         action="store_true",
         help="Disable face tracking and use static center crop for 1:1, 3:4, and 4:5 ratios",
+    )
+    p.add_argument(
+        "--gameplay-layout",
+        type=_parse_gameplay_layout,
+        default=None,
+        help="Gameplay layout for non-16:9 ratios. 'fit' = full gameplay over blurred background. "
+             "'x,y,w,h' = facecam box in the source as fractions (e.g. 0.75,0.70,0.25,0.30), "
+             "rendered as facecam on top, gameplay below. Replaces face tracking; ignores B-roll and watermark.",
     )
 
     # --- Smart Auto-Framing / Tracking ---
@@ -934,6 +955,7 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         dev_mode_with_output_merge=args.dev_mode_with_output_merge,
         track_lines=args.track_lines,
         static_crop=args.static_crop,
+        gameplay_layout=args.gameplay_layout,
         # Story Clip Mode
         story_mode=args.story_mode,
         story_recipe_path=os.path.abspath(args.story_recipe) if args.story_recipe else None,
