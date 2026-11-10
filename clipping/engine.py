@@ -141,6 +141,7 @@ def download_video(
     download_source_height: str | int = "max",
     source_platform: str = "youtube",
     yt_cookies: str | None = None,
+    source_section: tuple[float, float] | None = None,
 ) -> None:
     """
     Download a video to *output_path* with configurable source height.
@@ -195,6 +196,11 @@ def download_video(
         }
 
     _apply_cookies(ydl_opts, yt_cookies)
+
+    if source_section:
+        from yt_dlp.utils import download_range_func
+        ydl_opts["download_ranges"] = download_range_func(None, [source_section])
+        print(f"      ✂️ Section only: {source_section[0]:.0f}s to {source_section[1]:.0f}s", flush=True)
 
     # --- Subtitle download — only supported for YouTube ---
     if use_dlp_subs and uses_youtube_format:

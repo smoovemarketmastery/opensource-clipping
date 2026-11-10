@@ -221,6 +221,24 @@ def _parse_download_height(val: str) -> str | int:
         raise argparse.ArgumentTypeError("Download source height must be a positive integer.")
     return parsed
 
+def _parse_section(val: str) -> tuple[float, float]:
+    def secs(t):
+        parts = [float(p) for p in t.strip().split(":")]
+        if not 1 <= len(parts) <= 3 or any(p < 0 for p in parts):
+            raise ValueError
+        total = 0.0
+        for p in parts:
+            total = total * 60 + p
+        return total
+    try:
+        a, b = (secs(t) for t in val.split("-"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--source-section '{val}': use START-END like 2:00:00-3:30:00")
+    if b <= a:
+        raise argparse.ArgumentTypeError(f"--source-section '{val}': END must be after START")
+    return (a, b)
+
+
 def _parse_gameplay_layout(val: str):
     import importlib.util
     path = os.path.join(os.path.dirname(__file__), "studio", "gameplay_layout.py")
@@ -254,6 +272,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["youtube", "tiktok", "instagram", "gdrive", "twitch", "kick"],
         default=SOURCE_PLATFORM,
         help="Video source platform. Determines download behavior and subtitle availability.",
+    )
+    p.add_argument(
+        "--source-section", type=_parse_section, default=None,
+        help="Download only part of a long VOD, e.g. 2:00:00-3:30:00. Clip times are relative to the section start.",
     )
     p.add_argument(
         "--tiktok",
@@ -956,6 +978,7 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         track_lines=args.track_lines,
         static_crop=args.static_crop,
         gameplay_layout=args.gameplay_layout,
+        source_section=args.source_section,
         # Story Clip Mode
         story_mode=args.story_mode,
         story_recipe_path=os.path.abspath(args.story_recipe) if args.story_recipe else None,
