@@ -85,6 +85,12 @@ def _cleanup_source_video(cfg):
     if os.path.exists(audio_path):
         os.remove(audio_path)
 
+    # Cache record and any leftover partial download (see engine.download_video)
+    base = os.path.splitext(video_path)[0]
+    for leftover in (base + ".source.json", base + ".download.mp4"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+
 
 def _run_single_url(cfg, url, version, idx=None, total=None):
     """

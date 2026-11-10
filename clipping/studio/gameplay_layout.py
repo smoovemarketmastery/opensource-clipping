@@ -76,8 +76,13 @@ def warn_once(cfg, message):
     """Print a warning once per config (one job), not once per render call.
 
     The record lives on the cfg object, so a new job in a long-lived worker warns again.
+    It also names its owner: a shallow copy (main.py clones per URL with copy.copy)
+    would otherwise share the set, so a clone starts a fresh one.
     """
-    warned = cfg.__dict__.setdefault("_gameplay_warned", set())
+    owner, warned = cfg.__dict__.get("_gameplay_warned", (None, None))
+    if owner is not cfg:
+        warned = set()
+        cfg._gameplay_warned = (cfg, warned)
     if message not in warned:
         warned.add(message)
         print(message, flush=True)

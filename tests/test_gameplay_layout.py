@@ -290,7 +290,8 @@ def test_every_clipping_module_imports(module, isolated_modules, monkeypatch, tm
 
 # --- Engine: source cache keyed to the request ---------------------------------
 
-def _engine(monkeypatch, downloads=None):
+def _engine(monkeypatch, downloads=None, fail=None):
+    """engine.py with a fake yt-dlp. `fail` (a list) makes the next download raise mid-way."""
     class FakeYDL:
         def __init__(self, opts):
             self.opts = opts
@@ -302,13 +303,18 @@ def _engine(monkeypatch, downloads=None):
             return False
 
         def extract_info(self, url, download=False):
-            return {"height": 1080, "vcodec": "avc1"}
+            vid = url.split("/videos/")[1].split("?")[0]  # like yt-dlp: id ignores query params
+            return {"height": 1080, "vcodec": "avc1", "extractor_key": "TwitchVod", "id": "v" + vid}
 
         def download(self, urls):
-            if Path(self.opts["outtmpl"]).exists():
+            out = Path(self.opts["outtmpl"])
+            if out.exists():
                 return  # real yt-dlp skips an existing file
             ranges = self.opts.get("download_ranges")
-            Path(self.opts["outtmpl"]).write_text(f"{urls[0]} {ranges}", encoding="utf-8")
+            if fail:
+                out.write_text("partial", encoding="utf-8")
+                raise RuntimeError(fail.pop())
+            out.write_text(f"{urls[0]} {ranges}", encoding="utf-8")
             if downloads is not None:
                 downloads.append(ranges)
 
@@ -326,6 +332,10 @@ def _engine(monkeypatch, downloads=None):
 URL = "https://www.twitch.tv/videos/1"
 
 
+def _sidecar(tmp_path):
+    return json.loads((tmp_path / "video_asli.source.json").read_text(encoding="utf-8"))
+
+
 def test_same_length_sections_do_not_share_the_cache(monkeypatch, tmp_path, capsys):
     downloads = []
     engine = _engine(monkeypatch, downloads)
@@ -334,9 +344,10 @@ def test_same_length_sections_do_not_share_the_cache(monkeypatch, tmp_path, caps
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
     assert downloads == [[(100.0, 130.0)], [(500.0, 530.0)]]
     assert "(500.0, 530.0)" in out.read_text(encoding="utf-8")
-    sidecar = json.loads((tmp_path / "video_asli.source.json").read_text(encoding="utf-8"))
-    assert sidecar == {"url": URL, "section": [500.0, 530.0], "actual_duration": 38.0}
+    assert _sidecar(tmp_path) == {"source_key": "TwitchVod:v1", "url": URL,
+                                  "section": [500.0, 530.0], "actual_duration": 38.0}
     assert "holds section 100-130s" in capsys.readouterr().out
+    assert not (tmp_path / "video_asli.download.mp4").exists()
 
 
 def test_cache_reuse_rules(monkeypatch, tmp_path):
@@ -344,20 +355,129 @@ def test_cache_reuse_rules(monkeypatch, tmp_path):
     engine = _engine(monkeypatch, downloads)
     out = tmp_path / "video_asli.mp4"
     sidecar = tmp_path / "video_asli.source.json"
-    # Same url and section: reused.
+    # Same source and section: reused.
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
     assert len(downloads) == 1
-    # Full video after a section: redownloaded, stale sidecar removed.
+    # Same VOD with ?t= and tracking params: same extractor id, reused.
+    engine.download_video(URL + "?t=1h2m&utm_source=x", str(out), source_platform="twitch",
+                          source_section=(100.0, 130.0))
+    assert len(downloads) == 1
+    # Full video after a section: redownloaded, and its own record written.
     engine.download_video(URL, str(out), source_platform="twitch")
-    assert downloads[-1] is None and not sidecar.exists()
-    # Section after a full (legacy, no sidecar) download: redownloaded.
+    assert downloads[-1] is None and _sidecar(tmp_path)["section"] is None
+    # Section after full: redownloaded.
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
     assert downloads[-1] == [(100.0, 130.0)] and len(downloads) == 3
-    # Legacy file, no sidecar, no section: reused as before.
+    # Legacy file (no sidecar), full request: reused as before. Section request: redownloaded.
     sidecar.unlink()
     engine.download_video(URL, str(out), source_platform="twitch")
-    assert len(downloads) == 3
+    assert len(downloads) == 3 and not sidecar.exists()  # reuse writes no record
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 4
+    # Empty file is never trusted, whatever the sidecar says.
+    out.write_bytes(b"")
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 5
+
+
+def test_three_section_spellings_share_one_cache_entry(monkeypatch, tmp_path, cli):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    for spelling in ("7200-7230", "02:00:00-02:00:30", "7200.0-7230.0"):
+        section = cli("--source-section", spelling).source_section
+        engine.download_video(URL, str(out), source_platform="twitch", source_section=section)
+    assert len(downloads) == 1
+
+
+def test_failed_download_keeps_previous_source(monkeypatch, tmp_path):
+    fail = []
+    engine = _engine(monkeypatch, fail=fail)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    before_video, before_sidecar = out.read_text(encoding="utf-8"), _sidecar(tmp_path)
+    fail.append("HTTP Error 403: Forbidden")  # cache miss, then the new download dies
+    with pytest.raises(RuntimeError, match="403"):
+        engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
+    assert out.read_text(encoding="utf-8") == before_video
+    assert _sidecar(tmp_path) == before_sidecar
+    assert not (tmp_path / "video_asli.download.mp4").exists()  # partial file cleaned up
+
+
+def test_corrupt_sidecar_redownloads_without_error(monkeypatch, tmp_path, capsys):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    (tmp_path / "video_asli.source.json").write_text('{"source_key": "Twit', encoding="utf-8")
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 2 and "record is unreadable" in capsys.readouterr().out
+    assert _sidecar(tmp_path)["section"] == [100.0, 130.0]
+
+
+def test_truncated_cache_is_redownloaded(monkeypatch, tmp_path, capsys):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    monkeypatch.setattr(engine, "_probe_duration", lambda path: 12.0 if Path(path) == out else 38.0)
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 2 and "length changed from 38.0s to 12.0s" in capsys.readouterr().out
+
+
+def test_section_drops_full_video_subtitles(monkeypatch, tmp_path):
+    engine = _engine(monkeypatch)
+    out = tmp_path / "video_asli.mp4"
+    stale = tmp_path / "video_asli.en.json3"
+    stale.write_text("{}", encoding="utf-8")
+    engine.download_video(URL, str(out), use_dlp_subs=True, source_platform="twitch",
+                          source_section=(100.0, 130.0))
+    assert not stale.exists()
+
+
+def test_cleanup_source_removes_video_and_sidecar(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    import main
+    video = tmp_path / "video_asli.mp4"
+    for name in ("video_asli.mp4", "video_asli.source.json", "video_asli.download.mp4"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    main._cleanup_source_video(SimpleNamespace(file_video_asli=str(video)))
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_batch_urls_each_emit_the_alignment_warning(monkeypatch, tmp_path, capsys):
+    """Runs main.py's real batch loop (copy.copy per URL) with the pipeline stubbed."""
+    monkeypatch.chdir(tmp_path)
+    for name in ("NVIDIA_API_KEY", "PEXELS_API_KEY", "HF_TOKEN"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")  # main() exits without one; never sent anywhere
+    monkeypatch.setattr(sys, "argv", ["main.py", "--url", "https://example.test/a", "https://example.test/b",
+                                      "--gameplay-layout", "fit", "--gameplay-align-h", "left"])
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *a, **k: None))
+
+    def run_pipeline(cfg, whisper_model_instance=None):
+        for _ in range(4):  # several renderer calls per clip
+            gl.warn_once(cfg, "ALIGN-WARNING")
+        return []
+
+    fake_runner = SimpleNamespace(run_pipeline=run_pipeline)
+    import clipping
+    monkeypatch.setattr(clipping, "runner", fake_runner, raising=False)
+    monkeypatch.setitem(sys.modules, "clipping.runner", fake_runner)
+    import main
+    main.main()
+    assert capsys.readouterr().out.count("ALIGN-WARNING") == 2
+
+
+def test_warn_once_survives_clone_after_warning(capsys):
+    import copy
+    cfg = SimpleNamespace()
+    gl.warn_once(cfg, "W")
+    clone = copy.copy(cfg)  # shares the stored set, but not its owner
+    gl.warn_once(clone, "W")
+    gl.warn_once(cfg, "W")
+    assert capsys.readouterr().out.count("W") == 2
 
 
 def test_section_length_mismatch_warns(monkeypatch, capsys):

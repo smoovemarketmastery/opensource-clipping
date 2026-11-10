@@ -198,13 +198,19 @@ def download_video(
 
     _apply_cookies(ydl_opts, yt_cookies)
 
-    if _invalidate_mismatched_cache(output_path, url, source_section):
-        return  # cached file matches this url and section exactly
     if source_section:
         from yt_dlp.utils import download_range_func
         # Fast path: cuts snap to keyframes (no re-encode), so the file can run a few seconds long.
         ydl_opts["download_ranges"] = download_range_func(None, [source_section])
         print(f"      ✂️ Section only: {source_section[0]:.0f}s to {source_section[1]:.0f}s (keyframe-aligned)", flush=True)
+        # Platform subtitles carry full-video timestamps; the runner would apply them to the
+        # section file. Drop them (including stale ones) so Whisper transcribes the section.
+        import glob
+        for stale in glob.glob(output_path.replace(".mp4", ".*.json3")):
+            os.remove(stale)
+        if use_dlp_subs:
+            print("      ℹ️ --use-dlp-subs skipped for a section download; Whisper will transcribe it.", flush=True)
+            use_dlp_subs = False
 
     # --- Subtitle download — only supported for YouTube ---
     if use_dlp_subs and uses_youtube_format:
@@ -235,6 +241,7 @@ def download_video(
         print(f"      ℹ️ {platform_label} tidak menyediakan subtitle otomatis. Whisper akan digunakan.")
 
     # Jalankan download video terpisah dari urusan subtitle
+    info = None
     with YoutubeDL(ydl_opts) as ydl:
         # Extra step to verify resolution before downloading
         try:
@@ -245,21 +252,40 @@ def download_video(
         except Exception as e:
             print(f"      ⚠️ Gagal mengecek info detail: {e}", flush=True)
 
-        ydl.download([url])
+    source_key = _source_key(url, info)
+    if _cache_matches(output_path, source_key, source_section):
+        return
+
+    # Download to a temp file and swap it in only on success, so a failed or
+    # killed download never destroys the previous cached source.
+    tmp_path = os.path.splitext(output_path)[0] + ".download.mp4"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)  # leftover from a killed run; yt-dlp would treat it as done
+    try:
+        with YoutubeDL({**ydl_opts, "outtmpl": tmp_path}) as ydl:
+            ydl.download([url])
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
     # --- Post-download verification ---
-    if not os.path.exists(output_path):
+    if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
         raise RuntimeError(
             f"❌ Download dari {platform_label} gagal — file video tidak ditemukan di {output_path}.\n"
             "      Pastikan URL valid dan bisa diakses secara publik."
         )
 
     if source_section:
-        actual = _report_section_duration(output_path, source_section)
-        _write_source_sidecar(output_path, url, source_section, actual)
-    elif os.path.exists(_sidecar_path(output_path)):
-        # A full download must not inherit a stale record from an earlier section run.
+        actual = _report_section_duration(tmp_path, source_section)
+    else:
+        actual = _probe_duration(tmp_path)
+    # ponytail: a kill between these steps leaves the new video without a sidecar; the next
+    # section request then redownloads (safe). Old sidecar goes first so it can't vouch for the new file.
+    if os.path.exists(_sidecar_path(output_path)):
         os.remove(_sidecar_path(output_path))
+    os.replace(tmp_path, output_path)
+    _write_source_sidecar(output_path, source_key, url, source_section, actual)
 
 
 def _probe_duration(path: str) -> float | None:
@@ -277,62 +303,87 @@ def _sidecar_path(video_path: str) -> str:
     return os.path.splitext(video_path)[0] + ".source.json"
 
 
-def _write_source_sidecar(video_path, url, section, actual_duration):
-    """Record what a section download contains, so a later run can tell if the cache matches."""
+def _source_key(url, info):
+    """Stable identity of a video: extractor + id when known, so ?t= or tracking params don't matter."""
+    if info and info.get("extractor_key") and info.get("id"):
+        return f"{info['extractor_key']}:{info['id']}"
+    return url
+
+
+def _normalize_section(section):
+    """(start, end) as floats, or None. Sections arrive pre-parsed, so every spelling of a range matches."""
+    if not section:
+        return None
+    return [round(float(section[0]), 3), round(float(section[1]), 3)]
+
+
+def _write_source_sidecar(video_path, source_key, url, section, actual_duration):
+    """Record what the cached source contains (atomically), so a later run can tell if it matches."""
     data = {
+        "source_key": source_key,
         "url": url,
-        "section": list(section) if section else None,
+        "section": _normalize_section(section),
         "actual_duration": actual_duration,
     }
-    with open(_sidecar_path(video_path), "w", encoding="utf-8") as f:
+    path = _sidecar_path(video_path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 
-def _invalidate_mismatched_cache(video_path, url, section):
-    """Delete a cached source that doesn't match this request, so yt-dlp downloads again.
+def _read_sidecar(video_path):
+    """The sidecar dict; None if absent; {} if unreadable or truncated (treated as unknown)."""
+    path = _sidecar_path(video_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
-    Returns True when the cached file is a verified match (url and section from
-    the sidecar), so the caller can skip yt-dlp entirely.
 
-    The cache is keyed by a sidecar written after section downloads. A section
-    request needs a sidecar with the same url and range. A full-video request
-    must not reuse a cached section. A legacy file without a sidecar and without
-    a section request is left to yt-dlp, which reuses it as before.
+def _cache_matches(video_path, source_key, section):
+    """True when the cached source can be reused for this request.
+
+    Gates, in order: the file exists and is non-empty; the sidecar records the
+    same source and section; the file's length still matches what was recorded.
+    A legacy file with no sidecar is reused only for a full-video request, as
+    before. Anything else is replaced, but only after the new download succeeds.
     """
-    if not os.path.exists(video_path):
+    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return False
-    sidecar = _sidecar_path(video_path)
-    cached = None
-    if os.path.exists(sidecar):
-        try:
-            with open(sidecar, encoding="utf-8") as f:
-                cached = json.load(f)
-        except (OSError, ValueError):
-            cached = {}
+    cached = _read_sidecar(video_path)
     if cached is None and not section:
-        return False  # legacy full-video cache: yt-dlp reuses it as before
-    wanted = list(section) if section else None
-    if cached is not None and cached.get("url") == url and cached.get("section") == wanted:
-        print("      ♻️ Reusing cached source (matches url and section).", flush=True)
-        return True
-    had = (cached or {}).get("section")
+        return True  # legacy full-video cache: same reuse as before sidecars existed
+    reason = None
     if cached is None:
         reason = "no record of what it contains"
-    elif had:
-        reason = f"it holds section {had[0]:.0f}-{had[1]:.0f}s from {cached.get('url')}"
+    elif not cached:
+        reason = "its record is unreadable"
+    elif cached.get("source_key", cached.get("url")) != source_key:
+        reason = f"it holds a different video ({cached.get('url')})"
+    elif cached.get("section") != _normalize_section(section):
+        had = cached.get("section")
+        reason = f"it holds section {had[0]:.0f}-{had[1]:.0f}s" if had else "it holds the full video"
     else:
-        reason = f"it holds the full video from {cached.get('url')}"
+        recorded = cached.get("actual_duration")
+        current = _probe_duration(video_path) if recorded else None
+        if recorded and current is not None and abs(current - recorded) > 1.0:
+            reason = f"its length changed from {recorded:.1f}s to {current:.1f}s (truncated?)"
+    if reason is None:
+        print("      ♻️ Reusing cached source (matches source and section).", flush=True)
+        return True
     bar = "!" * 70
     lines = [
         "", bar,
         f"⚠️  Cached source does not match this request ({reason}).",
-        f"    Deleting and downloading again: {video_path}",
+        f"    Downloading again; it is replaced only if the new download succeeds: {video_path}",
         bar, "",
     ]
     print("\n".join(lines), flush=True)
-    os.remove(video_path)
-    if os.path.exists(sidecar):
-        os.remove(sidecar)
     return False
 
 
