@@ -188,8 +188,11 @@ def render(input_video, output_video, start, end, layout, out_w, out_h, cfg, *,
     """Render a silent clip with the layout (same output contract as buat_video_hybrid).
 
     encode_args: FFmpeg output encode args (codec, pix_fmt, fps).
-    run_ffmpeg: callable(cmd, duration, label); cmd has no output path yet.
+    run_ffmpeg: callable(cmd, duration, label) -> (return_code, recent_errors), like
+        ffmpeg_utils.run_ffmpeg_with_progress; cmd has no output path yet.
     Only -filter_complex is used (never -vf), so the graph owns every stream.
+    FFmpeg creates the output when the muxer opens, so a mid-stream failure leaves a
+    partial file: the exit code, not the file's existence, decides success.
     """
     graph = build_filter(layout, out_w, out_h, watermark=bool(watermark_png), **options(cfg))
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -197,6 +200,9 @@ def render(input_video, output_video, start, end, layout, out_w, out_h, cfg, *,
     if watermark_png:
         cmd += ["-loop", "1", "-i", watermark_png]
     cmd += ["-filter_complex", graph, "-map", "[v]", "-an", "-t", str(end - start)] + encode_args
-    run_ffmpeg(cmd, end - start, label)
+    return_code, recent_errors = run_ffmpeg(cmd, end - start, label)
+    if return_code != 0:
+        raise RuntimeError(f"{label}: gameplay render failed (ffmpeg exit {return_code}):\n"
+                           + "\n".join(recent_errors[-20:]))
     if not os.path.exists(output_video):
         raise RuntimeError(f"{label}: gameplay render produced no file at {output_video}")

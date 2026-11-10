@@ -164,6 +164,12 @@ def download_video(
 
     # --- Google Drive: use gdown instead of yt-dlp ---
     if source_platform == "gdrive":
+        if source_section:
+            print(
+                "      ⚠️ --source-section is not supported for Google Drive: "
+                "downloading the whole file. Clip times are relative to the full video.",
+                flush=True,
+            )
         _download_gdrive(url, output_path)
         if not os.path.exists(output_path):
             raise RuntimeError(

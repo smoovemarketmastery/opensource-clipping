@@ -157,14 +157,31 @@ def test_warn_once_is_per_config(capsys):
 
 def test_overlay_input_is_looped_before_its_input():
     cmd = []
+
+    def capture(c, d, l):
+        cmd.extend(c)
+        return 0, []
+
     try:
         gl.render("in.mp4", "missing.mp4", 0, 1, "fit", 1080, 1920, SimpleNamespace(),
-                  encode_args=[], run_ffmpeg=lambda c, d, l: cmd.extend(c), watermark_png="wm.png")
+                  encode_args=[], run_ffmpeg=capture, watermark_png="wm.png")
     except RuntimeError:
         pass  # no output file: only the command matters here
     i = cmd.index("wm.png")
     assert cmd[i - 3:i + 1] == ["-loop", "1", "-i", "wm.png"]
     assert "-vf" not in cmd and cmd.index("-filter_complex") > i
+
+
+def test_failed_ffmpeg_with_partial_output_raises(tmp_path):
+    out = tmp_path / "out.mp4"
+
+    def failing(cmd, dur, label):
+        out.write_bytes(b"x")  # ffmpeg opens the muxer before it fails mid-stream
+        return 1, ["boom"]
+
+    with pytest.raises(RuntimeError, match="(?s)ffmpeg exit 1.*boom"):
+        gl.render("in.mp4", str(out), 0, 1, "fit", 1080, 1920, SimpleNamespace(),
+                  encode_args=[], run_ffmpeg=failing)
 
 
 def test_facecam_share_crop_and_watermark():
@@ -193,6 +210,7 @@ def test_web_payload_cfg_renders_without_new_flags(monkeypatch, tmp_path):
     def fake_run(cmd, dur, label):
         calls.append(cmd)
         out.write_bytes(b"x")
+        return 0, []
 
     gl.render("in.mp4", str(out), 1.0, 3.0, "fit", 1080, 1920, cfg,
               encode_args=["-c:v", "libx264"], run_ffmpeg=fake_run)
@@ -694,7 +712,8 @@ def source(tmp_path):
 
 def _render(src, out, layout, cfg, wm=None):
     def run(cmd, dur, label):
-        subprocess.run(cmd + ["-pix_fmt", "yuv420p", str(out)], check=True)
+        done = subprocess.run(cmd + ["-pix_fmt", "yuv420p", str(out)], capture_output=True, text=True)
+        return done.returncode, done.stderr.splitlines()[-20:]
 
     gl.render(str(src), str(out), 0.5, 2.5, layout, 1080, 1920, cfg,
               encode_args=["-c:v", "libx264", "-preset", "ultrafast"], run_ffmpeg=run, watermark_png=wm)
@@ -717,8 +736,30 @@ def test_layouts_render_vertical(tmp_path, source, layout, fit):
     assert dims == (1080, 1920) and secs == 2.0
 
 
+def _has_scalable_font():
+    """Whether the text watermark can get a real TrueType font, as TextWatermarkRenderer looks it up.
+
+    Without one it falls back to Pillow's ~10px bitmap font, too small for the
+    region assertion below. The image-watermark tests cover the alpha/color math
+    on any machine; this one only checks text placement.
+    """
+    from PIL import ImageFont
+    font_dir = Path.cwd() / "custom_fonts"
+    for candidate in [font_dir / "Montserrat-Black.ttf", font_dir / "Montserrat-Regular.ttf", "arial.ttf"]:
+        if isinstance(candidate, Path) and not candidate.exists():
+            continue
+        try:
+            ImageFont.truetype(str(candidate), 40)
+            return True
+        except OSError:
+            continue
+    return False
+
+
 @render_deps
 def test_watermark_is_burned_in(tmp_path, source):
+    if not _has_scalable_font():
+        pytest.skip("no TrueType font for the text watermark (custom_fonts/Montserrat-*.ttf or arial.ttf)")
     wm_mod = _load("watermark.py", "test_gameplay_watermark_mod")
     cfg = SimpleNamespace(watermark_enabled=True, watermark_text="SMOOVE", watermark_image=None,
                           watermark_opacity=100, watermark_position="top-left", watermark_padding=40,

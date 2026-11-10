@@ -121,7 +121,9 @@ def buat_video_hybrid(
         cap_g = cv2.VideoCapture(input_video)
         src_w_g = cap_g.get(cv2.CAP_PROP_FRAME_WIDTH)
         src_h_g = int(cap_g.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps_g = cap_g.get(cv2.CAP_PROP_FPS) or 30
+        fps_g = cap_g.get(cv2.CAP_PROP_FPS)
+        if not fps_g or math.isnan(fps_g):  # NaN is truthy; "-r nan" kills ffmpeg at startup
+            fps_g = 30.0
         cap_g.release()
         out_w_g, out_h_g = _get_render_dims(cfg, rasio, source_h=src_h_g)
         opts_g = _gameplay.options(cfg)
