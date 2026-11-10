@@ -72,6 +72,17 @@ def idle_alignments(src_w, src_h, crop, panel_w, panel_h, fit, align_h, align_v)
     return idle
 
 
+def warn_once(cfg, message):
+    """Print a warning once per config (one job), not once per render call.
+
+    The record lives on the cfg object, so a new job in a long-lived worker warns again.
+    """
+    warned = cfg.__dict__.setdefault("_gameplay_warned", set())
+    if message not in warned:
+        warned.add(message)
+        print(message, flush=True)
+
+
 def _mask(src_pad, out_pad, cam, mode):
     """Hide the facecam copy inside the gameplay source. Returns (chain, pad)."""
     if not cam or mode == "none":

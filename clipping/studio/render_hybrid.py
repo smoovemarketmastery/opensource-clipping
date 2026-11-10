@@ -131,8 +131,10 @@ def buat_video_hybrid(
             opts_g["fit"], opts_g["align_h"], opts_g["align_v"],
         )
         if idle:
-            print(f"   ⚠️ {label} - {', '.join(idle)} has no effect: no slack on that axis "
-                  f"with --gameplay-fit {opts_g['fit']} for this source.", flush=True)
+            _gameplay.warn_once(
+                cfg, f"   ⚠️ {', '.join(idle)} has no effect: no slack on that axis "
+                     f"with --gameplay-fit {opts_g['fit']} for this source."
+            )
         wm_png = None
         if getattr(cfg, "watermark_enabled", False):
             import tempfile

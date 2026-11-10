@@ -260,7 +260,7 @@ python main.py --help
 | `--url`, `-u` | — | Video URL to process (Required) |
 | `--yt-cookies` | `None` | Cookies from browser (e.g. `chrome`) or path to `cookies.txt` to avoid yt-dlp blocks |
 | `--source` | `youtube` | Video source platform. Choices: `youtube`, `tiktok`, `instagram`, `gdrive`, `twitch`, `kick`. |
-| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00`. Keyframe-aligned, so it can run a few seconds long. Clip times are relative to the section |
+| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00`. Keyframe-aligned, so it can run a few seconds long. Clip times are relative to the section. A cached source is reused only if its `.source.json` sidecar matches the url and range |
 | `--clips`, `-n` | `7` | Number of highlight clips to generate |
 | `--ratio`, `-r` | `9:16` | Output aspect ratio (`9:16`, `16:9`, `1:1`, `3:4`, `4:5`) |
 | `--source-height` | `max` | Preferred source download max height (`max`, `1080`, `1440`, `2160`, etc.) |

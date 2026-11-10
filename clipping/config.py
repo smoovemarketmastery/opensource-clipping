@@ -602,7 +602,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gameplay-mask-cam",
         choices=["blur", "darken", "none"],
         default=None,
-        help="Hide the duplicate facecam inside the gameplay. Default: blur when a facecam box is given.",
+        help="Hide the duplicate facecam inside the gameplay. Default: blur when a facecam box is given. "
+             "This is redaction: the blur stays inside the cam box and keeps a hard edge, which "
+             "sits on the stream overlay's own border.",
     )
 
     # --- Smart Auto-Framing / Tracking ---

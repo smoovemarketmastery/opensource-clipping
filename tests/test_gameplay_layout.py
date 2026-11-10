@@ -4,7 +4,9 @@ Pure tests run in the lightweight CI env. Render tests need ffmpeg, OpenCV,
 NumPy and Pillow and skip otherwise.
 """
 
+import importlib
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -141,7 +143,28 @@ def test_cam_mask_modes():
         cam, 1080, 1920, mask_cam="darken")
     none = gl.build_filter(cam, 1080, 1920, mask_cam="none")
     assert "game_masked" not in none and "[game_src]split[game_s1]" in none
-    assert "game_masked" not in gl.build_filter("fit", 1080, 1920)
+    # Blur with no cam box (fit) is a no-op, not a crash.
+    assert gl.build_filter("fit", 1080, 1920, mask_cam="blur") == gl.build_filter("fit", 1080, 1920)
+
+
+def test_warn_once_is_per_config(capsys):
+    job1, job2 = SimpleNamespace(), SimpleNamespace()
+    for _ in range(5):  # renderer runs several times per clip
+        gl.warn_once(job1, "align warning")
+    gl.warn_once(job2, "align warning")
+    assert capsys.readouterr().out.count("align warning") == 2
+
+
+def test_overlay_input_is_looped_before_its_input():
+    cmd = []
+    try:
+        gl.render("in.mp4", "missing.mp4", 0, 1, "fit", 1080, 1920, SimpleNamespace(),
+                  encode_args=[], run_ffmpeg=lambda c, d, l: cmd.extend(c), watermark_png="wm.png")
+    except RuntimeError:
+        pass  # no output file: only the command matters here
+    i = cmd.index("wm.png")
+    assert cmd[i - 3:i + 1] == ["-loop", "1", "-i", "wm.png"]
+    assert "-vf" not in cmd and cmd.index("-filter_complex") > i
 
 
 def test_facecam_share_crop_and_watermark():
@@ -201,25 +224,140 @@ def test_web_payload_cfg_renders_without_new_flags(monkeypatch, tmp_path):
     assert "source_section" in seen and seen["source_section"] is None
 
 
-# --- Engine: --source-section on an existing source ----------------------------
+# --- Import smoke test: every module in clipping/ ------------------------------
 
-def _engine(monkeypatch):
-    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=None))
+@pytest.fixture
+def isolated_modules():
+    """Remove the stubs and project modules a smoke import added.
+
+    Real third-party packages that got imported stay loaded: some (OpenCV)
+    can't be imported a second time in one process once their submodules
+    are removed.
+    """
+    from unittest.mock import MagicMock
+    before = dict(sys.modules)
+    yield
+    for name in set(sys.modules) - set(before):
+        mod = sys.modules[name]
+        if isinstance(mod, MagicMock) or name.split(".")[0] in ("clipping", "web", "scripts") \
+                or name.startswith("smoke_"):
+            del sys.modules[name]
+    sys.modules.update(before)
+
+
+def _import_with_stubs(import_fn, max_stubs=60):
+    """Import, stubbing each missing third-party dependency until it loads.
+
+    Only absent packages are stubbed, so installed ones are exercised for real.
+    Syntax errors and missing project modules still fail.
+    """
+    from unittest.mock import MagicMock
+    for _ in range(max_stubs):
+        try:
+            return import_fn()
+        except ModuleNotFoundError as exc:
+            if not exc.name or exc.name.split(".")[0] in ("clipping", "web", "scripts"):
+                raise
+            parts = exc.name.split(".")
+            for i in range(1, len(parts) + 1):
+                sys.modules.setdefault(".".join(parts[:i]), MagicMock())
+    raise AssertionError("too many missing dependencies")
+
+
+CLIPPING_MODULES = sorted(
+    p.relative_to(ROOT).with_suffix("").as_posix()
+    for p in (ROOT / "clipping").rglob("*.py")
+    if "__pycache__" not in p.parts
+)
+
+
+@pytest.mark.parametrize("module", CLIPPING_MODULES)
+def test_every_clipping_module_imports(module, isolated_modules, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    if module.startswith("clipping/studio/"):
+        # Loaded by file path in production (clipping/studio.py shadows the folder).
+        def load():
+            spec = importlib.util.spec_from_file_location(
+                "smoke_" + module.replace("/", "_"), ROOT / f"{module}.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    else:
+        def load():
+            return importlib.import_module(module.replace("/", ".").removesuffix(".__init__"))
+    assert _import_with_stubs(load) is not None
+
+
+# --- Engine: source cache keyed to the request ---------------------------------
+
+def _engine(monkeypatch, downloads=None):
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {"height": 1080, "vcodec": "avc1"}
+
+        def download(self, urls):
+            if Path(self.opts["outtmpl"]).exists():
+                return  # real yt-dlp skips an existing file
+            ranges = self.opts.get("download_ranges")
+            Path(self.opts["outtmpl"]).write_text(f"{urls[0]} {ranges}", encoding="utf-8")
+            if downloads is not None:
+                downloads.append(ranges)
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYDL))
+    monkeypatch.setitem(sys.modules, "yt_dlp.utils",
+                        SimpleNamespace(download_range_func=lambda chapters, ranges: ranges))
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=None))
     spec = importlib.util.spec_from_file_location("test_gameplay_engine", ROOT / "clipping" / "engine.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_probe_duration", lambda path: 38.0)  # same length for every section
     return module
 
 
-def test_section_on_cached_source_is_loud_noop(monkeypatch, tmp_path, capsys):
-    engine = _engine(monkeypatch)
-    cached = tmp_path / "video_asli.mp4"
-    cached.write_bytes(b"not a real video")
-    engine._warn_section_cached(str(cached), (7200.0, 7230.0))
-    out = capsys.readouterr().out
-    assert "--source-section 7200-7230s NOT APPLIED" in out
-    assert str(cached) in out and "--cleanup-source" in out and "!" * 70 in out
+URL = "https://www.twitch.tv/videos/1"
+
+
+def test_same_length_sections_do_not_share_the_cache(monkeypatch, tmp_path, capsys):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
+    assert downloads == [[(100.0, 130.0)], [(500.0, 530.0)]]
+    assert "(500.0, 530.0)" in out.read_text(encoding="utf-8")
+    sidecar = json.loads((tmp_path / "video_asli.source.json").read_text(encoding="utf-8"))
+    assert sidecar == {"url": URL, "section": [500.0, 530.0], "actual_duration": 38.0}
+    assert "holds section 100-130s" in capsys.readouterr().out
+
+
+def test_cache_reuse_rules(monkeypatch, tmp_path):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    sidecar = tmp_path / "video_asli.source.json"
+    # Same url and section: reused.
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 1
+    # Full video after a section: redownloaded, stale sidecar removed.
+    engine.download_video(URL, str(out), source_platform="twitch")
+    assert downloads[-1] is None and not sidecar.exists()
+    # Section after a full (legacy, no sidecar) download: redownloaded.
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert downloads[-1] == [(100.0, 130.0)] and len(downloads) == 3
+    # Legacy file, no sidecar, no section: reused as before.
+    sidecar.unlink()
+    engine.download_video(URL, str(out), source_platform="twitch")
+    assert len(downloads) == 3
 
 
 def test_section_length_mismatch_warns(monkeypatch, capsys):
@@ -310,6 +448,24 @@ def test_colored_image_watermark_keeps_bgr_order(tmp_path, source):
     _, _, frame = _render(source, tmp_path / "wm.mp4", "fit", SimpleNamespace(), wm=png)
     b, g, r = frame[900:1020, 480:600].reshape(-1, 3).mean(axis=0)
     assert r > 200 and g < 50 and b < 50, (b, g, r)
+
+
+@render_deps
+def test_half_opacity_watermark_keeps_alpha_and_color(tmp_path):
+    from PIL import Image
+    red = tmp_path / "red.png"
+    Image.new("RGBA", (200, 200), (255, 0, 0, 255)).save(red)
+    wm_mod = _load("watermark.py", "test_gameplay_watermark_half_mod")
+    cfg = SimpleNamespace(watermark_enabled=True, watermark_text=None, watermark_image=str(red),
+                          watermark_opacity=50, watermark_position="center", watermark_padding=0,
+                          watermark_font_size=0, watermark_scale=20)
+    png = gl.make_watermark_overlay(wm_mod.apply_watermark, cfg, 1080, 1920, str(tmp_path / "wm.png"))
+    import cv2
+    overlay = cv2.imread(png, cv2.IMREAD_UNCHANGED)
+    b, g, r, a = overlay[900:1020, 480:600].reshape(-1, 4).mean(axis=0)
+    assert abs(a - 127.5) <= 2, a              # 50% opacity survives
+    assert r >= 250 and g <= 3 and b <= 3      # and color is unpremultiplied back to pure red
+    assert overlay[:200, :200, 3].max() == 0   # outside the watermark stays transparent
 
 
 @render_deps

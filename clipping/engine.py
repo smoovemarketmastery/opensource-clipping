@@ -198,10 +198,8 @@ def download_video(
 
     _apply_cookies(ydl_opts, yt_cookies)
 
-    if source_section and os.path.exists(output_path):
-        # yt-dlp reuses an existing file as-is, so the section can't be re-applied.
-        _warn_section_cached(output_path, source_section)
-        source_section = None
+    if _invalidate_mismatched_cache(output_path, url, source_section):
+        return  # cached file matches this url and section exactly
     if source_section:
         from yt_dlp.utils import download_range_func
         # Fast path: cuts snap to keyframes (no re-encode), so the file can run a few seconds long.
@@ -257,7 +255,11 @@ def download_video(
         )
 
     if source_section:
-        _report_section_duration(output_path, source_section)
+        actual = _report_section_duration(output_path, source_section)
+        _write_source_sidecar(output_path, url, source_section, actual)
+    elif os.path.exists(_sidecar_path(output_path)):
+        # A full download must not inherit a stale record from an earlier section run.
+        os.remove(_sidecar_path(output_path))
 
 
 def _probe_duration(path: str) -> float | None:
@@ -271,33 +273,76 @@ def _probe_duration(path: str) -> float | None:
         return None
 
 
-def _warn_section_cached(path: str, section: tuple[float, float]) -> None:
-    """Loud notice: an existing source file wins over --source-section."""
-    actual = _probe_duration(path)
-    length = f"{actual:.0f}s" if actual is not None else "unknown length"
+def _sidecar_path(video_path: str) -> str:
+    return os.path.splitext(video_path)[0] + ".source.json"
+
+
+def _write_source_sidecar(video_path, url, section, actual_duration):
+    """Record what a section download contains, so a later run can tell if the cache matches."""
+    data = {
+        "url": url,
+        "section": list(section) if section else None,
+        "actual_duration": actual_duration,
+    }
+    with open(_sidecar_path(video_path), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _invalidate_mismatched_cache(video_path, url, section):
+    """Delete a cached source that doesn't match this request, so yt-dlp downloads again.
+
+    Returns True when the cached file is a verified match (url and section from
+    the sidecar), so the caller can skip yt-dlp entirely.
+
+    The cache is keyed by a sidecar written after section downloads. A section
+    request needs a sidecar with the same url and range. A full-video request
+    must not reuse a cached section. A legacy file without a sidecar and without
+    a section request is left to yt-dlp, which reuses it as before.
+    """
+    if not os.path.exists(video_path):
+        return False
+    sidecar = _sidecar_path(video_path)
+    cached = None
+    if os.path.exists(sidecar):
+        try:
+            with open(sidecar, encoding="utf-8") as f:
+                cached = json.load(f)
+        except (OSError, ValueError):
+            cached = {}
+    if cached is None and not section:
+        return False  # legacy full-video cache: yt-dlp reuses it as before
+    wanted = list(section) if section else None
+    if cached is not None and cached.get("url") == url and cached.get("section") == wanted:
+        print("      ♻️ Reusing cached source (matches url and section).", flush=True)
+        return True
+    had = (cached or {}).get("section")
+    if cached is None:
+        reason = "no record of what it contains"
+    elif had:
+        reason = f"it holds section {had[0]:.0f}-{had[1]:.0f}s from {cached.get('url')}"
+    else:
+        reason = f"it holds the full video from {cached.get('url')}"
     bar = "!" * 70
     lines = [
-        "",
-        bar,
-        f"⚠️  --source-section {section[0]:.0f}-{section[1]:.0f}s NOT APPLIED.",
-        f"    Reusing existing source file ({length}): {path}",
-        "    It may be the full VOD or a different section.",
-        "    To apply this section, delete that file and rerun.",
-        "    --cleanup-source deletes it only after a successful run, so a failed or",
-        "    interrupted run leaves it behind for the next run to reuse.",
-        bar,
-        "",
+        "", bar,
+        f"⚠️  Cached source does not match this request ({reason}).",
+        f"    Deleting and downloading again: {video_path}",
+        bar, "",
     ]
     print("\n".join(lines), flush=True)
+    os.remove(video_path)
+    if os.path.exists(sidecar):
+        os.remove(sidecar)
+    return False
 
 
-def _report_section_duration(path: str, section: tuple[float, float]) -> None:
+def _report_section_duration(path: str, section: tuple[float, float]) -> float | None:
     """Log the real duration of a section download and warn when it differs from the request."""
     requested = section[1] - section[0]
     actual = _probe_duration(path)
     if actual is None:
         print("      ⚠️ Could not measure section length (ffprobe failed).", flush=True)
-        return
+        return None
     print(f"      ✂️ Section length: {actual:.1f}s (requested {requested:.1f}s)", flush=True)
     if abs(actual - requested) > 1.0:
         print(
@@ -305,6 +350,7 @@ def _report_section_duration(path: str, section: tuple[float, float]) -> None:
             f"up to {abs(actual - requested):.0f}s outside the requested window.",
             flush=True,
         )
+    return actual
 
 
 # ==============================================================================
