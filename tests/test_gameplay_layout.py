@@ -357,7 +357,7 @@ def test_same_length_sections_do_not_share_the_cache(monkeypatch, tmp_path, caps
     engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
     assert downloads == [[(100.0, 130.0)], [(500.0, 530.0)]]
     assert "(500.0, 530.0)" in out.read_text(encoding="utf-8")
-    assert _sidecar(tmp_path) == {"source_key": "TwitchVod:v1", "url": URL, "normalized_url": URL,
+    assert _sidecar(tmp_path) == {"source_key": "TwitchVod:v1", "url": URL, "normalized_urls": [URL],
                                   "section": [500.0, 530.0], "actual_duration": 38.0}
     assert "holds section 100-130s" in capsys.readouterr().out
     assert not (tmp_path / "video_asli.download.mp4").exists()
@@ -416,6 +416,69 @@ def test_different_url_spelling_falls_back_to_extractor_id(monkeypatch, tmp_path
     engine.download_video("https://twitch.tv/videos/1/", str(out), source_platform="twitch",
                           source_section=(100.0, 130.0))  # no www: URL differs, same video id
     assert len(downloads) == 1 and len(instances) == 1  # one metadata call, no media download
+
+
+def test_offline_with_unmatched_url_fails_clearly(monkeypatch, tmp_path):
+    instances, offline = [], []
+    engine = _engine(monkeypatch, instances=instances, offline=offline)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    before = out.read_text(encoding="utf-8")
+    offline.append(True)
+    with pytest.raises(RuntimeError) as exc:
+        engine.download_video("https://twitch.tv/videos/1/", str(out), source_platform="twitch",
+                              source_section=(100.0, 130.0))
+    msg = str(exc.value)
+    assert "while offline" in msg and str(out) in msg and URL in msg
+    assert "different URL" in msg and "not reused or replaced" in msg
+    assert out.read_text(encoding="utf-8") == before  # no silent reuse, no clobber
+    # Same URL, different section, offline: the message names the section instead.
+    with pytest.raises(RuntimeError, match="holds section 100-130s"):
+        engine.download_video(URL, str(out), source_platform="twitch", source_section=(500.0, 530.0))
+
+
+@pytest.mark.parametrize("old_sidecar,reused", [
+    # Round 4: id recorded, no URL list -> metadata check confirms the id, cache reused.
+    ({"source_key": "TwitchVod:v1", "url": URL, "section": [100.0, 130.0], "actual_duration": 38.0}, True),
+    # Round 3: no id at all -> metadata check can't confirm it, so it is replaced.
+    ({"url": URL, "section": [100.0, 130.0], "actual_duration": 38.0}, False),
+])
+def test_older_sidecars_fall_through_to_metadata_check(monkeypatch, tmp_path, old_sidecar, reused):
+    downloads, instances = [], []
+    engine = _engine(monkeypatch, downloads, instances=instances)
+    out = tmp_path / "video_asli.mp4"
+    out.write_text("cached", encoding="utf-8")
+    (tmp_path / "video_asli.source.json").write_text(json.dumps(old_sidecar), encoding="utf-8")
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert instances  # no KeyError; the URL check missed and the metadata check ran
+    assert (downloads == []) is reused
+    assert URL in _sidecar(tmp_path)["normalized_urls"]  # either way, the next run is offline
+
+
+def test_malformed_sidecar_fields_are_unknown_not_errors(monkeypatch, tmp_path, capsys):
+    downloads = []
+    engine = _engine(monkeypatch, downloads)
+    out = tmp_path / "video_asli.mp4"
+    out.write_text("cached", encoding="utf-8")
+    (tmp_path / "video_asli.source.json").write_text(json.dumps(
+        {"source_key": "TwitchVod:v1", "normalized_urls": "oops", "section": [1],
+         "actual_duration": "long"}), encoding="utf-8")
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert len(downloads) == 1 and "record is malformed" in capsys.readouterr().out
+
+
+def test_id_match_remembers_the_new_spelling(monkeypatch, tmp_path):
+    instances = []
+    engine = _engine(monkeypatch, instances=instances)
+    out = tmp_path / "video_asli.mp4"
+    alt = "https://twitch.tv/videos/1/"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    engine.download_video(alt, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert _sidecar(tmp_path)["normalized_urls"] == [URL, "https://twitch.tv/videos/1"]
+    instances.clear()
+    for u in (alt, URL):  # both spellings are now offline hits
+        engine.download_video(u, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    assert instances == []
 
 
 def test_section_never_runs_the_subtitle_pass(monkeypatch, tmp_path):

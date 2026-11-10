@@ -248,6 +248,7 @@ def download_video(
 
     # Jalankan download video terpisah dari urusan subtitle
     info = None
+    meta_error = None
     with YoutubeDL(ydl_opts) as ydl:
         # Extra step to verify resolution before downloading
         try:
@@ -256,11 +257,30 @@ def download_video(
             v_codec = info.get("vcodec", "unknown")
             print(f"      ✅ Mendownload: {best_h}p (Codec: {v_codec})", flush=True)
         except Exception as e:
+            meta_error = e
             print(f"      ⚠️ Gagal mengecek info detail: {e}", flush=True)
+
+    if info is None and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        # Can't tell whether the cached file is this video. Reusing it risks clipping the
+        # wrong VOD; downloading would only fail with a network traceback. Say what happened.
+        cached = _read_sidecar(output_path)
+        try:
+            why = _mismatch_reason(cached, output_path, source_section, url_key, None)
+        except (TypeError, ValueError, IndexError, AttributeError):
+            why = "its record is malformed"
+        raise RuntimeError(
+            f"❌ Could not match the cached source to this request while offline.\n"
+            f"      Cached file: {output_path}\n"
+            f"      Recorded URL: {(cached or {}).get('url') or 'unknown'}\n"
+            f"      Requested URL: {url}\n"
+            f"      Offline check failed: {why}.\n"
+            f"      The video id lookup also failed ({meta_error}), so it was not reused or replaced.\n"
+            "      Rerun with the recorded URL and section, or reconnect."
+        )
 
     # Different URL spelling for the same video (?t=, tracking params): match on extractor id.
     source_key = _source_key(url, info)
-    if _cache_matches(output_path, source_section, source_key=source_key):
+    if _cache_matches(output_path, source_section, url_key=url_key, source_key=source_key):
         return
 
     # Download to a temp file and swap it in only on success, so a failed or
@@ -341,18 +361,31 @@ def _normalize_section(section):
 
 def _write_source_sidecar(video_path, source_key, url, url_key, section, actual_duration):
     """Record what the cached source contains (atomically), so a later run can tell if it matches."""
-    data = {
+    _save_sidecar(video_path, {
         "source_key": source_key,
         "url": url,
-        "normalized_url": url_key,
+        "normalized_urls": [url_key],
         "section": _normalize_section(section),
         "actual_duration": actual_duration,
-    }
+    })
+
+
+def _save_sidecar(video_path, data):
     path = _sidecar_path(video_path)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
+
+
+def _known_urls(cached):
+    """Normalized URLs confirmed for this cache. Tolerates older sidecars (single or no field)."""
+    urls = cached.get("normalized_urls")
+    known = [u for u in urls if isinstance(u, str)] if isinstance(urls, list) else []
+    single = cached.get("normalized_url")  # round-4 shape
+    if isinstance(single, str):
+        known.append(single)
+    return known
 
 
 def _read_sidecar(video_path):
@@ -368,41 +401,53 @@ def _read_sidecar(video_path):
         return {}
 
 
+def _mismatch_reason(cached, video_path, section, url_key, source_key):
+    """Why the cache can't serve this request, or None. Every field is optional (.get)."""
+    if cached is None:
+        return "no record of what it contains"
+    if not cached:
+        return "its record is unreadable"
+    if source_key is None:
+        if url_key not in _known_urls(cached):
+            return f"it was recorded for a different URL ({cached.get('url')})"
+    elif cached.get("source_key", cached.get("url")) != source_key:
+        return f"it holds a different video ({cached.get('url')})"
+    if cached.get("section") != _normalize_section(section):
+        had = cached.get("section")
+        return f"it holds section {float(had[0]):.0f}-{float(had[1]):.0f}s" if had else "it holds the full video"
+    recorded = cached.get("actual_duration")
+    current = _probe_duration(video_path) if recorded else None
+    if recorded and current is not None and abs(current - float(recorded)) > 1.0:
+        return f"its length changed from {float(recorded):.1f}s to {current:.1f}s (truncated?)"
+    return None
+
+
 def _cache_matches(video_path, section, *, url_key=None, source_key=None, quiet=False):
     """True when the cached source can be reused for this request.
 
-    Identity is checked by normalized URL (url_key, no network needed) or by
-    extractor id (source_key, needs a metadata call); pass exactly one.
+    Identity is checked by extractor id when source_key is given (needs a
+    metadata call), otherwise by normalized URL (no network).
     Gates, in order: the file exists and is non-empty; the sidecar records the
     same source and section; the file's length still matches what was recorded.
     A legacy file with no sidecar is reused only for a full-video request, as
     before. Anything else is replaced, but only after the new download succeeds.
     quiet=True suppresses the mismatch banner (used for the offline first check).
+    On an id match, url_key is remembered so that spelling is an offline hit next time.
     """
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return False
     cached = _read_sidecar(video_path)
     if cached is None and not section:
         return True  # legacy full-video cache: same reuse as before sidecars existed
-    reason = None
-    if cached is None:
-        reason = "no record of what it contains"
-    elif not cached:
-        reason = "its record is unreadable"
-    elif (cached.get("normalized_url") != url_key if source_key is None
-          else cached.get("source_key", cached.get("url")) != source_key):
-        reason = f"it holds a different video ({cached.get('url')})"
-    elif cached.get("section") != _normalize_section(section):
-        had = cached.get("section")
-        reason = f"it holds section {had[0]:.0f}-{had[1]:.0f}s" if had else "it holds the full video"
-    else:
-        recorded = cached.get("actual_duration")
-        current = _probe_duration(video_path) if recorded else None
-        if recorded and current is not None and abs(current - recorded) > 1.0:
-            reason = f"its length changed from {recorded:.1f}s to {current:.1f}s (truncated?)"
+    try:
+        reason = _mismatch_reason(cached, video_path, section, url_key, source_key)
+    except (TypeError, ValueError, IndexError, AttributeError):
+        reason = "its record is malformed"  # parsed JSON, wrong shapes: treat as unknown
     if reason is None:
         how = "url" if source_key is None else "video id"
         print(f"      ♻️ Reusing cached source (matches {how} and section).", flush=True)
+        if source_key is not None and url_key and url_key not in _known_urls(cached):
+            _save_sidecar(video_path, {**cached, "normalized_urls": _known_urls(cached) + [url_key]})
         return True
     if quiet:
         return False
