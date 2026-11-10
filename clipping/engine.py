@@ -6,6 +6,7 @@ Maps to Cell 2 (The Engine) of the notebook.
 
 import json
 import os
+import subprocess
 import re
 import time
 
@@ -197,10 +198,15 @@ def download_video(
 
     _apply_cookies(ydl_opts, yt_cookies)
 
+    if source_section and os.path.exists(output_path):
+        # yt-dlp reuses an existing file as-is, so the section can't be re-applied.
+        print("      ℹ️ --source-section ignored: using the existing source file as-is.", flush=True)
+        source_section = None
     if source_section:
         from yt_dlp.utils import download_range_func
+        # Fast path: cuts snap to keyframes (no re-encode), so the file can run a few seconds long.
         ydl_opts["download_ranges"] = download_range_func(None, [source_section])
-        print(f"      ✂️ Section only: {source_section[0]:.0f}s to {source_section[1]:.0f}s", flush=True)
+        print(f"      ✂️ Section only: {source_section[0]:.0f}s to {source_section[1]:.0f}s (keyframe-aligned)", flush=True)
 
     # --- Subtitle download — only supported for YouTube ---
     if use_dlp_subs and uses_youtube_format:
@@ -248,6 +254,30 @@ def download_video(
         raise RuntimeError(
             f"❌ Download dari {platform_label} gagal — file video tidak ditemukan di {output_path}.\n"
             "      Pastikan URL valid dan bisa diakses secara publik."
+        )
+
+    if source_section:
+        _report_section_duration(output_path, source_section)
+
+
+def _report_section_duration(path: str, section: tuple[float, float]) -> None:
+    """Log the real duration of a section download and warn when it differs from the request."""
+    requested = section[1] - section[0]
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout.strip()
+        actual = float(out)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        print(f"      ⚠️ Could not measure section length ({e}).", flush=True)
+        return
+    print(f"      ✂️ Section length: {actual:.1f}s (requested {requested:.1f}s)", flush=True)
+    if abs(actual - requested) > 1.0:
+        print(
+            "      ⚠️ Section is approximate: cuts snap to keyframes, so clips may include "
+            f"up to {abs(actual - requested):.0f}s outside the requested window.",
+            flush=True,
         )
 
 

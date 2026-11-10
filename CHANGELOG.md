@@ -8,6 +8,13 @@ All notable changes to the **OpenSource Clipping** project will be documented in
 - **Patch (x.y.Z)**: Incremented for backward-compatible bug fixes or minor patches.
 
 
+## [Unreleased]
+
+### Added
+- **Gameplay layout (`--gameplay-layout`)**: Vertical layouts for gaming streams, rendered as one FFmpeg filter graph instead of face tracking. `x,y,w,h` stacks the streamer's facecam above the gameplay; `fit` is for streams without a facecam. The gameplay panel defaults to `contain` so HUD elements like the minimap stay visible; `--gameplay-fit cover`, `--gameplay-crop`, `--gameplay-anchor` and `--gameplay-cam-share` tune it. Watermarks are supported; B-roll is skipped and not downloaded. Ignored in `--dev-mode`; combining with `--split-screen` or `--camera-switch` is a CLI error.
+- **Twitch and Kick sources**: `--source twitch` and `--source kick` download VODs through the existing yt-dlp path.
+- **Section download (`--source-section START-END`)**: Downloads only part of a long VOD. Cuts are keyframe-aligned (no re-encode), so the real length is measured and a warning is printed when it differs from the request. Clip times are relative to the section. Ignored when the source file already exists.
+
 ## [v1.15.]
 
 ### Fixed

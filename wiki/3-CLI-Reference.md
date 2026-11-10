@@ -9,7 +9,8 @@ Complete reference for all command-line arguments. Run `python main.py --help` f
 | Argument | Default | Description |
 |---|---|---|
 | `--url`, `-u` | — | Video URL to process (**Required** unless `--story-mode`) |
-| `--source` | `youtube` | Video source platform: `youtube`, `tiktok`, `instagram`, `gdrive` |
+| `--source` | `youtube` | Video source platform: `youtube`, `tiktok`, `instagram`, `gdrive`, `twitch`, `kick` |
+| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00` (keyframe-aligned) |
 | `--clips`, `-n` | `7` | Number of highlight clips to generate |
 | `--ratio`, `-r` | `9:16` | Output aspect ratio: `9:16`, `16:9`, `1:1`, `3:4`, `4:5` |
 | `--source-height` | `max` | Preferred source download max height (`max`, `1080`, `1440`, `2160`) |
@@ -136,6 +137,11 @@ Complete reference for all command-line arguments. Run `python main.py --help` f
 | `--yolo-size` | `8m` | YOLO model size: `8n`, `8s`, `8m`, `8n_v2`, `9c` |
 | `--box-face-detection` | `False` | Draw yellow bounding boxes (debug) |
 | `--static-crop` | `False` | Disable face tracking, use static center crop |
+| `--gameplay-layout` | `None` | Gaming layout for non-16:9 ratios. `x,y,w,h` = facecam box (source fractions), stacked above the gameplay. `fit` = no facecam. Replaces face tracking and skips B-roll. Ignored in `--dev-mode`. Cannot combine with `--split-screen`/`--camera-switch` |
+| `--gameplay-crop` | `None` | Source region used as gameplay (`x,y,w,h` fractions), e.g. to exclude an overlaid facecam or chat. Default: whole frame |
+| `--gameplay-fit` | `contain` | `contain` shows the whole gameplay region over a blurred copy (keeps HUD/minimap). `cover` fills the panel and crops the overflow |
+| `--gameplay-anchor` | `center` | Gameplay placement in its panel (`contain`) or kept side (`cover`): `center`, `top`, `bottom`, `left`, `right` |
+| `--gameplay-cam-share` | `0.35` | Fraction of output height used by the facecam (0.1-0.7) |
 
 ---
 

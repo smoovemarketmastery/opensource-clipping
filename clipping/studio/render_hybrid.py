@@ -116,21 +116,33 @@ def buat_video_hybrid(
 
     video_encoder = detect_video_encoder(cfg)
 
-    gameplay = getattr(cfg, "gameplay_layout", None)
-    if gameplay and rasio != "16:9":
-        if broll_data or getattr(cfg, "watermark_enabled", False):
-            print(f"   ⚠️ {label} - Gameplay layout ignores B-roll and watermark.", flush=True)
+    gameplay = _gameplay.active_layout(cfg, rasio)
+    if gameplay:
         cap_g = cv2.VideoCapture(input_video)
         src_w_g = cap_g.get(cv2.CAP_PROP_FRAME_WIDTH)
         src_h_g = int(cap_g.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps_g = cap_g.get(cv2.CAP_PROP_FPS) or 30
         cap_g.release()
         out_w_g, out_h_g = _get_render_dims(cfg, rasio, source_h=src_h_g)
+        wm_png = None
+        if getattr(cfg, "watermark_enabled", False):
+            _wm_mod = _load_studio_internal_module("watermark.py", "clipping_studio_watermark")
+            wm_png = os.path.splitext(output_video)[0] + "_wm.png"
+            _gameplay.make_watermark_overlay(_wm_mod.apply_watermark, cfg, out_w_g, out_h_g, wm_png)
         print(f"🎮 {label} - Gameplay layout ({'fit' if gameplay == 'fit' else 'facecam'})...", flush=True)
-        _gameplay.render(
-            input_video, output_video, start_clip, end_clip, gameplay, out_w_g, out_h_g,
-            get_mp4_encode_args, video_encoder, build_ffmpeg_progress_cmd,
-            run_ffmpeg_with_progress, label,
-        )
+        try:
+            _gameplay.render(
+                input_video, output_video, start_clip, end_clip, gameplay, out_w_g, out_h_g, cfg,
+                encode_args=get_mp4_encode_args(video_encoder, fps_g),
+                run_ffmpeg=lambda cmd, dur, lbl: run_ffmpeg_with_progress(
+                    build_ffmpeg_progress_cmd(cmd, output_video), dur, label=lbl
+                ),
+                watermark_png=wm_png,
+                label=label,
+            )
+        finally:
+            if wm_png and os.path.exists(wm_png):
+                os.remove(wm_png)
         print(f"✅ {label} selesai.", flush=True)
         return lambda t: src_w_g / 2
 

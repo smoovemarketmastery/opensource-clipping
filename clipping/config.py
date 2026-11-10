@@ -239,17 +239,39 @@ def _parse_section(val: str) -> tuple[float, float]:
     return (a, b)
 
 
-def _parse_gameplay_layout(val: str):
-    import importlib.util
-    path = os.path.join(os.path.dirname(__file__), "studio", "gameplay_layout.py")
-    spec = importlib.util.spec_from_file_location("clipping_studio_gameplay_layout", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    parse_layout = mod.parse_layout
+def _parse_box(val: str, flag: str) -> tuple[float, float, float, float]:
     try:
-        return parse_layout(val)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
+        x, y, w, h = (float(p) for p in val.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{flag} '{val}': use four fractions x,y,w,h, e.g. 0.75,0.70,0.25,0.30"
+        )
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1
+            and x + w <= 1.0001 and y + h <= 1.0001):
+        raise argparse.ArgumentTypeError(
+            f"{flag} '{val}': x,y,w,h must be fractions 0-1 and the box must fit inside the frame"
+        )
+    return (x, y, w, h)
+
+
+def _parse_gameplay_layout(val: str):
+    if val.strip().lower() == "fit":
+        return "fit"
+    return _parse_box(val, "--gameplay-layout")
+
+
+def _parse_gameplay_crop(val: str):
+    return _parse_box(val, "--gameplay-crop")
+
+
+def _parse_cam_share(val: str) -> float:
+    try:
+        share = float(val)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--gameplay-cam-share '{val}': must be a number like 0.35")
+    if not 0.1 <= share <= 0.7:
+        raise argparse.ArgumentTypeError(f"--gameplay-cam-share {share}: must be between 0.1 and 0.7")
+    return share
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -538,9 +560,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gameplay-layout",
         type=_parse_gameplay_layout,
         default=None,
-        help="Gameplay layout for non-16:9 ratios. 'fit' = full gameplay over blurred background. "
-             "'x,y,w,h' = facecam box in the source as fractions (e.g. 0.75,0.70,0.25,0.30), "
-             "rendered as facecam on top, gameplay below. Replaces face tracking; ignores B-roll and watermark.",
+        help="Gameplay layout for non-16:9 ratios, replacing face tracking. "
+             "'x,y,w,h' = facecam box in the source as fractions (e.g. 0.75,0.70,0.25,0.30): "
+             "facecam on top, gameplay below. 'fit' = no facecam, gameplay fills the frame. "
+             "Skips B-roll. Ignored in --dev-mode. Cannot combine with --split-screen or --camera-switch.",
+    )
+    p.add_argument(
+        "--gameplay-crop",
+        type=_parse_gameplay_crop,
+        default=None,
+        help="Region of the source used as gameplay, as fractions x,y,w,h. Default: whole frame.",
+    )
+    p.add_argument(
+        "--gameplay-fit",
+        choices=["contain", "cover"],
+        default="contain",
+        help="contain = show the whole gameplay region over a blurred copy (keeps HUD/minimap). "
+             "cover = fill the panel and crop the overflow. Default: contain.",
+    )
+    p.add_argument(
+        "--gameplay-anchor",
+        choices=["center", "top", "bottom", "left", "right"],
+        default="center",
+        help="Where gameplay sits in its panel (contain) or which side is kept (cover). Default: center.",
+    )
+    p.add_argument(
+        "--gameplay-cam-share",
+        type=_parse_cam_share,
+        default=0.35,
+        help="Fraction of output height used by the facecam (0.1-0.7). Default: 0.35.",
     )
 
     # --- Smart Auto-Framing / Tracking ---
@@ -827,6 +875,9 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
     if not args.story_mode and not args.url:
         parser.error("--url is required unless --story-mode is used.")
 
+    if args.gameplay_layout and (args.split_screen or args.camera_switch):
+        parser.error("--gameplay-layout cannot be combined with --split-screen or --camera-switch.")
+
     # Normalize URL list for batch support
     url_list = args.url if isinstance(args.url, list) else ([args.url] if args.url else [])
 
@@ -978,6 +1029,10 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         track_lines=args.track_lines,
         static_crop=args.static_crop,
         gameplay_layout=args.gameplay_layout,
+        gameplay_crop=args.gameplay_crop,
+        gameplay_fit=args.gameplay_fit,
+        gameplay_anchor=args.gameplay_anchor,
+        gameplay_cam_share=args.gameplay_cam_share,
         source_section=args.source_section,
         # Story Clip Mode
         story_mode=args.story_mode,
