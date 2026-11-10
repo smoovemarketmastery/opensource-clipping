@@ -481,6 +481,32 @@ def test_id_match_remembers_the_new_spelling(monkeypatch, tmp_path):
     assert instances == []
 
 
+def test_known_urls_are_capped(monkeypatch, tmp_path):
+    engine = _engine(monkeypatch)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+    # Unknown per-share params survive normalization, so each run is a new spelling.
+    for i in range(12):
+        engine.download_video(f"{URL}?share={i}", str(out), source_platform="twitch",
+                              source_section=(100.0, 130.0))
+    urls = _sidecar(tmp_path)["normalized_urls"]
+    assert len(urls) == engine.MAX_KNOWN_URLS == 8
+    assert urls[-1] == f"{URL}?share=11" and len(set(urls)) == 8
+
+
+def test_logic_errors_surface_instead_of_looking_malformed(monkeypatch, tmp_path):
+    engine = _engine(monkeypatch)
+    out = tmp_path / "video_asli.mp4"
+    engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+
+    def broken(section):
+        raise TypeError("bug in decision logic")
+
+    monkeypatch.setattr(engine, "_normalize_section", broken)
+    with pytest.raises(TypeError, match="bug in decision logic"):
+        engine.download_video(URL, str(out), source_platform="twitch", source_section=(100.0, 130.0))
+
+
 def test_section_never_runs_the_subtitle_pass(monkeypatch, tmp_path):
     instances = []
     engine = _engine(monkeypatch, instances=instances)

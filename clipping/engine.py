@@ -264,10 +264,7 @@ def download_video(
         # Can't tell whether the cached file is this video. Reusing it risks clipping the
         # wrong VOD; downloading would only fail with a network traceback. Say what happened.
         cached = _read_sidecar(output_path)
-        try:
-            why = _mismatch_reason(cached, output_path, source_section, url_key, None)
-        except (TypeError, ValueError, IndexError, AttributeError):
-            why = "its record is malformed"
+        why = _mismatch_reason(_load_record(cached), output_path, source_section, url_key, None)
         raise RuntimeError(
             f"❌ Could not match the cached source to this request while offline.\n"
             f"      Cached file: {output_path}\n"
@@ -378,14 +375,52 @@ def _save_sidecar(video_path, data):
     os.replace(tmp, path)
 
 
-def _known_urls(cached):
-    """Normalized URLs confirmed for this cache. Tolerates older sidecars (single or no field)."""
-    urls = cached.get("normalized_urls")
-    known = [u for u in urls if isinstance(u, str)] if isinstance(urls, list) else []
-    single = cached.get("normalized_url")  # round-4 shape
-    if isinstance(single, str):
-        known.append(single)
-    return known
+MAX_KNOWN_URLS = 8  # a sidecar is not a log: unknown per-share params must not grow it forever
+
+
+def _validated_record(raw):
+    """Typed fields from a parsed sidecar dict. Raises ValueError on wrong shapes.
+
+    This is the only place that interprets sidecar data, so the decision logic
+    below can assume clean types and its own bugs surface instead of looking
+    like a malformed file. Every field is optional; older sidecars lack some.
+    """
+    def opt(key, types):
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, types)):
+            raise ValueError(f"sidecar field {key!r} has type {type(value).__name__}")
+        return value
+
+    urls = opt("normalized_urls", list) or []
+    if not all(isinstance(u, str) for u in urls):
+        raise ValueError("sidecar field 'normalized_urls' must hold strings")
+    single = opt("normalized_url", str)  # round-4 shape
+    section = opt("section", list)
+    if section is not None:
+        if len(section) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in section):
+            raise ValueError("sidecar field 'section' must be [start, end]")
+        section = [round(float(x), 3) for x in section]
+    duration = opt("actual_duration", (int, float))
+    url = opt("url", str)
+    return {
+        "url": url,
+        "source_key": opt("source_key", str) or url,
+        "known_urls": urls + ([single] if single and single not in urls else []),
+        "section": section,
+        "actual_duration": float(duration) if duration is not None else None,
+    }
+
+
+def _load_record(raw):
+    """None (no sidecar), "unreadable", "malformed", or a validated record."""
+    if raw is None:
+        return None
+    if not raw:
+        return "unreadable"
+    try:
+        return _validated_record(raw)
+    except ValueError:
+        return "malformed"
 
 
 def _read_sidecar(video_path):
@@ -401,24 +436,26 @@ def _read_sidecar(video_path):
         return {}
 
 
-def _mismatch_reason(cached, video_path, section, url_key, source_key):
-    """Why the cache can't serve this request, or None. Every field is optional (.get)."""
-    if cached is None:
+def _mismatch_reason(record, video_path, section, url_key, source_key):
+    """Why the cache can't serve this request, or None. `record` comes from _load_record."""
+    if record is None:
         return "no record of what it contains"
-    if not cached:
+    if record == "unreadable":
         return "its record is unreadable"
+    if record == "malformed":
+        return "its record is malformed"
     if source_key is None:
-        if url_key not in _known_urls(cached):
-            return f"it was recorded for a different URL ({cached.get('url')})"
-    elif cached.get("source_key", cached.get("url")) != source_key:
-        return f"it holds a different video ({cached.get('url')})"
-    if cached.get("section") != _normalize_section(section):
-        had = cached.get("section")
-        return f"it holds section {float(had[0]):.0f}-{float(had[1]):.0f}s" if had else "it holds the full video"
-    recorded = cached.get("actual_duration")
+        if url_key not in record["known_urls"]:
+            return f"it was recorded for a different URL ({record['url']})"
+    elif record["source_key"] != source_key:
+        return f"it holds a different video ({record['url']})"
+    if record["section"] != _normalize_section(section):
+        had = record["section"]
+        return f"it holds section {had[0]:.0f}-{had[1]:.0f}s" if had else "it holds the full video"
+    recorded = record["actual_duration"]
     current = _probe_duration(video_path) if recorded else None
-    if recorded and current is not None and abs(current - float(recorded)) > 1.0:
-        return f"its length changed from {float(recorded):.1f}s to {current:.1f}s (truncated?)"
+    if recorded and current is not None and abs(current - recorded) > 1.0:
+        return f"its length changed from {recorded:.1f}s to {current:.1f}s (truncated?)"
     return None
 
 
@@ -436,18 +473,17 @@ def _cache_matches(video_path, section, *, url_key=None, source_key=None, quiet=
     """
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return False
-    cached = _read_sidecar(video_path)
-    if cached is None and not section:
+    raw = _read_sidecar(video_path)
+    if raw is None and not section:
         return True  # legacy full-video cache: same reuse as before sidecars existed
-    try:
-        reason = _mismatch_reason(cached, video_path, section, url_key, source_key)
-    except (TypeError, ValueError, IndexError, AttributeError):
-        reason = "its record is malformed"  # parsed JSON, wrong shapes: treat as unknown
+    record = _load_record(raw)
+    reason = _mismatch_reason(record, video_path, section, url_key, source_key)
     if reason is None:
         how = "url" if source_key is None else "video id"
         print(f"      ♻️ Reusing cached source (matches {how} and section).", flush=True)
-        if source_key is not None and url_key and url_key not in _known_urls(cached):
-            _save_sidecar(video_path, {**cached, "normalized_urls": _known_urls(cached) + [url_key]})
+        if source_key is not None and url_key and url_key not in record["known_urls"]:
+            urls = (record["known_urls"] + [url_key])[-MAX_KNOWN_URLS:]
+            _save_sidecar(video_path, {**raw, "normalized_urls": urls})
         return True
     if quiet:
         return False
