@@ -13,6 +13,9 @@ import time
 from yt_dlp import YoutubeDL
 from faster_whisper import WhisperModel
 
+# Clip length bounds live in config; --max-clip-duration lowers the upper bound per run.
+from clipping.config import MIN_CLIP_DURATION, MAX_CLIP_DURATION
+
 
 # ==============================================================================
 # TAHAP 1: DOWNLOAD VIDEO
@@ -869,13 +872,9 @@ def _generate_json_with_retry(client, model, fallback_model, contents, config):
     ) from last_exc
 
 
-# ==== KONFIGURASI DURASI KLIP ====
-# Ubah nilai di bawah ini jika ingin mengganti batas durasi klip (dalam detik)
-MIN_CLIP_DURATION = 20
-MAX_CLIP_DURATION = 179
-
 def get_analysis_prompt(transkrip_lengkap: str, jumlah_clip: int, durasi_hook: int, cfg=None) -> str:
     """Centralized prompt for both Gemini and NVIDIA providers."""
+    max_durasi = getattr(cfg, "max_clip_duration", MAX_CLIP_DURATION) if cfg else MAX_CLIP_DURATION
     # Build optional Hook V2 prompt section
     _hook_v2_prompt = ""
     if cfg and getattr(cfg, "hook_v2", False):
@@ -924,7 +923,7 @@ TUGAS UTAMA:
 - Semua output harus sangat relevan dengan isi klip, bukan isi video penuh secara umum.
 
 ATURAN PEMILIHAN KLIP & VIRAL-BILITY:
-- Durasi klip harus {MIN_CLIP_DURATION}-{MAX_CLIP_DURATION} detik.
+- Durasi klip harus {MIN_CLIP_DURATION}-{max_durasi} detik.
 - Pilih bagian yang punya emosi, konflik, kejutan, insight, opini kuat, pelajaran praktis, atau punchline jelas.
 - Evaluasi kekuatan viral (viral-bility) dan berikan "viral_score" (1-100) yang merepresentasikan seberapa viral suatu klip.
   - 90-100: Sangat berpotensi fyp/viral, emosi/konflik kuat, hook sangat nendang.
@@ -956,7 +955,7 @@ ATURAN PEMOTONGAN TIMING:
 - Jangan potong terlalu awal jika kalimat masih menggantung.
 - Jangan lanjutkan klip terlalu lama setelah inti pesan selesai.
 - Klip harus tetap bisa dipahami tanpa harus menonton bagian sebelum atau sesudahnya.
-- Jika ada dua momen kuat yang terlalu berdekatan dan saling mendukung, boleh digabung selama durasi tetap {MIN_CLIP_DURATION}-{MAX_CLIP_DURATION} detik.
+- Jika ada dua momen kuat yang terlalu berdekatan dan saling mendukung, boleh digabung selama durasi tetap {MIN_CLIP_DURATION}-{max_durasi} detik.
 - Jika ada dua momen kuat tetapi angle-nya berbeda, pisahkan sebagai kandidat klip berbeda.
 
 PENILAIAN INTERNAL VIRAL_SCORE:

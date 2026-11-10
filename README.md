@@ -275,6 +275,7 @@ python main.py --help
 | `--video-scale-algo` | `lanczos` | Resize algorithm for render (`lanczos`: sharp, `bicubic`: balanced, `area`/`bilinear`: fast/blurry) |
 | `--words-per-sub` | `5` | Max words per karaoke subtitle group |
 | `--hook-duration` | `3` | Hook teaser duration (seconds) |
+| `--max-clip-duration` | `179` | Longest clip in seconds, not counting the hook (20-179). Gemini is asked for it, and longer picks are cut at the end (`keep_segments` share the budget). Use `58` for Shorts/TikTok |
 | `--font-style` | `HORMOZI` | Font preset (`DEFAULT`, `STORYTELLER`, `HORMOZI`, `CINEMATIC`) |
 | `--no-broll` | — | Disable B-roll footage |
 | `--no-hook` | — | Disable hook glitch teaser |

@@ -257,6 +257,37 @@ def normalize_and_validate(hasil_json: list[dict]) -> list[dict]:
     return valid_items
 
 
+def cap_clip_durations(clips: list[dict], max_seconds: float) -> list[dict]:
+    """Return copies of *clips* whose main part is at most *max_seconds* long.
+
+    The prompt asks the AI for the limit, but nothing enforces it, so longer
+    picks are cut at the end. Both timings are capped because the renderer uses
+    keep_segments for smart-trim renders and start/end_time otherwise.
+    """
+    capped = []
+    for clip in clips:
+        start, end = float(clip["start_time"]), float(clip["end_time"])
+        new = {**clip, "end_time": min(end, start + max_seconds)}
+        was_cut = new["end_time"] < end
+        segments = clip.get("keep_segments")
+        if segments:
+            kept, budget = [], max_seconds
+            for seg in segments:
+                if budget <= 0:
+                    was_cut = True
+                    break
+                s_start, s_end = float(seg["start_time"]), float(seg["end_time"])
+                if s_end > s_start + budget:
+                    s_end, was_cut = s_start + budget, True
+                kept.append({**seg, "start_time": s_start, "end_time": s_end})
+                budget -= s_end - s_start
+            new["keep_segments"] = kept
+        if was_cut:
+            print(f"   ✂️ Rank {clip.get('rank', '?')}: cut to {max_seconds:g}s (--max-clip-duration).")
+        capped.append(new)
+    return capped
+
+
 def print_preview(hasil_json: list[dict]) -> None:
     """Print a human-readable metadata preview to stdout."""
     print("✅ Preview metadata siap.")

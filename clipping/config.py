@@ -158,6 +158,11 @@ NVIDIA_MODEL = "deepseek-ai/deepseek-v4-pro"
 GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 
+# Clip length bounds in seconds (main part; the hook teaser is added on top).
+# --max-clip-duration lowers the upper bound per run.
+MIN_CLIP_DURATION = 20
+MAX_CLIP_DURATION = 179
+
 
 # ==============================================================================
 # HELPERS
@@ -343,6 +348,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DURASI_HOOK,
         help="Hook teaser duration in seconds",
+    )
+    p.add_argument(
+        "--max-clip-duration",
+        type=int,
+        default=MAX_CLIP_DURATION,
+        help=f"Longest clip in seconds, not counting the hook ({MIN_CLIP_DURATION}-{MAX_CLIP_DURATION}). "
+             "Gemini is asked for it and longer picks are cut at the end. Example: 58 for Shorts/TikTok.",
     )
     p.add_argument(
         "--hook-source",
@@ -891,6 +903,9 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
     if not args.story_mode and not args.url:
         parser.error("--url is required unless --story-mode is used.")
 
+    if not MIN_CLIP_DURATION <= args.max_clip_duration <= MAX_CLIP_DURATION:
+        parser.error(f"--max-clip-duration must be {MIN_CLIP_DURATION}-{MAX_CLIP_DURATION}, got {args.max_clip_duration}.")
+
     if args.gameplay_layout and (args.split_screen or args.camera_switch):
         parser.error("--gameplay-layout cannot be combined with --split-screen or --camera-switch.")
     gameplay_opts = (args.gameplay_crop, args.gameplay_fit, args.gameplay_align_h,
@@ -970,6 +985,7 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         # Konten & Hook
         max_kata_per_subtitle=args.words_per_sub,
         durasi_hook=args.hook_duration,
+        max_clip_duration=args.max_clip_duration,
         hook_source=args.hook_source,
         hook_source_start=args.hook_source_start,
         # Hook V2 & Segment Trimming
