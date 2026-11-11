@@ -802,7 +802,7 @@ def _is_retryable(exc: Exception) -> bool:
 
     msg = str(exc).lower()
     keywords = (
-        "timeout", "temporarily unavailable", "deadline",
+        "timeout", "timed out", "temporarily unavailable", "deadline",
         "connection reset", "connection aborted", "service unavailable",
     )
     return any(k in msg for k in keywords)
