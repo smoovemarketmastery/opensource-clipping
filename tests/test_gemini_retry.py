@@ -105,13 +105,35 @@ def test_busy_keeps_all_attempts_when_fallback_is_the_same_model_or_missing(monk
     assert calls == ["main"] * engine.MAX_ATTEMPTS
 
 
-def test_other_5xx_errors_keep_all_attempts(monkeypatch):
+@pytest.mark.parametrize("message", [
+    "500 INTERNAL. An internal error has occurred.",
+    "502 Bad Gateway",
+    "504 DEADLINE_EXCEEDED gateway",   # also timeout-class by design: stops at the timeout cap
+])
+def test_other_5xx_errors_do_not_count_as_busy(monkeypatch, message):
     engine = _engine(monkeypatch)
     calls = []
     always = lambda n: True
-    always.error = Exception("500 INTERNAL. An internal error has occurred.")
+    always.error = Exception(message)
     engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None)
-    assert calls == ["main"] * engine.MAX_ATTEMPTS + ["fallback"]
+    expected = engine.TIMEOUT_MAX_ATTEMPTS if "deadline" in message.lower() else engine.MAX_ATTEMPTS
+    assert calls == ["main"] * expected + ["fallback"]
+
+
+def test_busy_errors_are_counted_across_the_run_not_only_consecutive(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    errors = [BUSY_503, Exception("500 INTERNAL"), BUSY_503, BUSY_503, BUSY_503]
+
+    def generate_content(model, contents, config):
+        calls.append(model)
+        if model == "main":
+            raise errors[min(calls.count("main"), len(errors)) - 1]
+        return SimpleNamespace(text='[{"rank": 1}]')
+
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    assert engine._generate_json_with_retry(client, "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * 5 + ["fallback"]   # the 4th busy error is the 5th attempt
 
 
 def test_not_found_goes_straight_to_fallback(monkeypatch):
