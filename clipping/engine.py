@@ -778,6 +778,8 @@ INITIAL_WAIT_SECONDS = 60
 WAIT_INCREMENT_SECONDS = 30
 REQUEST_TIMEOUT_MS = 15 * 60 * 1000  # 15 menit
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+# A stalled read can take minutes per try, so timeouts get fewer attempts than busy/5xx errors.
+TIMEOUT_MAX_ATTEMPTS = 3
 
 
 def _extract_status_code(exc: Exception):
@@ -793,6 +795,8 @@ def _extract_status_code(exc: Exception):
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
     if isinstance(exc, json.JSONDecodeError):
         return True
 
@@ -802,15 +806,22 @@ def _is_retryable(exc: Exception) -> bool:
 
     msg = str(exc).lower()
     keywords = (
-        "timeout", "temporarily unavailable", "deadline",
+        "timeout", "timed out", "temporarily unavailable", "deadline",
         "connection reset", "connection aborted", "service unavailable",
     )
     return any(k in msg for k in keywords)
 
 
+def _is_timeout(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (isinstance(exc, TimeoutError) or _extract_status_code(exc) == 408
+            or any(k in msg for k in ("timed out", "timeout", "deadline")))
+
+
 def _generate_json_with_retry(client, model, fallback_model, contents, config):
     last_exc = None
     status_code = None
+    timeouts = 0
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -838,7 +849,8 @@ def _generate_json_with_retry(client, model, fallback_model, contents, config):
                 f"status={status_code} | error={exc}"
             )
 
-            if (not retryable) or attempt == MAX_ATTEMPTS:
+            timeouts += _is_timeout(exc)
+            if (not retryable) or attempt == MAX_ATTEMPTS or timeouts >= TIMEOUT_MAX_ATTEMPTS:
                 break
 
             wait_seconds = INITIAL_WAIT_SECONDS + ((attempt - 1) * WAIT_INCREMENT_SECONDS)
@@ -868,7 +880,7 @@ def _generate_json_with_retry(client, model, fallback_model, contents, config):
             ) from exc_fallback
 
     raise RuntimeError(
-        f"Gagal memanggil Gemini setelah {MAX_ATTEMPTS} percobaan. Error terakhir: {last_exc}"
+        f"Gagal memanggil Gemini setelah {attempt} percobaan. Error terakhir: {last_exc}"
     ) from last_exc
 
 
