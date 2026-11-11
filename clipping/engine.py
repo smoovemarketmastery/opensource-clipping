@@ -780,6 +780,10 @@ REQUEST_TIMEOUT_MS = 15 * 60 * 1000  # 15 menit
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 # A stalled read can take minutes per try, so timeouts get fewer attempts than busy/5xx errors.
 TIMEOUT_MAX_ATTEMPTS = 3
+# "High demand" (503) / rate-limit (429): when a *different* fallback model is set, switch to it after this
+# many busy errors (counted across the run, not only consecutive) instead of waiting out all MAX_ATTEMPTS (~27 min of backoff) on a busy model.
+BUSY_MAX_ATTEMPTS = 4
+BUSY_STATUS_CODES = {429, 503}
 
 
 def _extract_status_code(exc: Exception):
@@ -818,10 +822,16 @@ def _is_timeout(exc: Exception) -> bool:
             or any(k in msg for k in ("timed out", "timeout", "deadline")))
 
 
+def _is_busy(exc: Exception) -> bool:
+    return _extract_status_code(exc) in BUSY_STATUS_CODES
+
+
 def _generate_json_with_retry(client, model, fallback_model, contents, config):
     last_exc = None
     status_code = None
     timeouts = 0
+    busy = 0
+    other_fallback = bool(fallback_model) and fallback_model != model
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -850,7 +860,14 @@ def _generate_json_with_retry(client, model, fallback_model, contents, config):
             )
 
             timeouts += _is_timeout(exc)
-            if (not retryable) or attempt == MAX_ATTEMPTS or timeouts >= TIMEOUT_MAX_ATTEMPTS:
+            busy += _is_busy(exc)
+            if (not retryable) or attempt == MAX_ATTEMPTS:
+                break
+            if timeouts >= TIMEOUT_MAX_ATTEMPTS:
+                print(f"[Gemini] Timeout {timeouts}x; berhenti mencoba {model}.")
+                break
+            if other_fallback and busy >= BUSY_MAX_ATTEMPTS:
+                print(f"[Gemini] {model} sibuk {busy}x (status {status_code}); pindah ke fallback {fallback_model}.")
                 break
 
             wait_seconds = INITIAL_WAIT_SECONDS + ((attempt - 1) * WAIT_INCREMENT_SECONDS)
