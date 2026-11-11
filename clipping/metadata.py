@@ -257,6 +257,59 @@ def normalize_and_validate(hasil_json: list[dict]) -> list[dict]:
     return valid_items
 
 
+def _segment_times(seg):
+    """(start, end) of a keep_segment as floats, or None if it is malformed."""
+    if not isinstance(seg, dict):
+        return None
+    try:
+        return float(seg["start_time"]), float(seg["end_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def cap_clip_durations(clips: list[dict], max_seconds: float) -> list[dict]:
+    """Return copies of *clips* whose main part is at most *max_seconds* long.
+
+    The prompt asks the AI for the limit, but nothing enforces it, so longer
+    picks are cut at the end. Both timings are capped because the renderer uses
+    keep_segments when there are 2 or more and start/end_time otherwise.
+    Malformed segments are skipped instead of failing the whole run.
+    """
+    capped = []
+    for clip in clips:
+        start, end = float(clip["start_time"]), float(clip["end_time"])
+        new = {**clip, "start_time": start, "end_time": min(end, start + max_seconds)}
+        was_cut = new["end_time"] < end
+        raw = clip.get("keep_segments")
+        segments = [raw] if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+        kept = []
+        if raw:
+            budget = max_seconds
+            for seg in segments:
+                times = _segment_times(seg)
+                if times is None:
+                    continue  # skipped without touching the budget
+                s_start, s_end = times
+                if s_end <= s_start or budget <= 0:
+                    was_cut = True
+                    continue
+                if s_end > s_start + budget:
+                    s_end, was_cut = s_start + budget, True
+                kept.append({**seg, "start_time": s_start, "end_time": s_end})
+                budget -= s_end - s_start
+            new["keep_segments"] = kept
+            # The renderer ignores a single segment, so render exactly that window.
+            if len(kept) == 1 and len(segments) > 1:
+                new["start_time"], new["end_time"] = kept[0]["start_time"], kept[0]["end_time"]
+        if was_cut:
+            main = (sum(s["end_time"] - s["start_time"] for s in kept) if len(kept) > 1
+                    else new["end_time"] - new["start_time"])
+            detail = f" ({main:g}s after segment trim)" if abs(main - max_seconds) > 0.05 else ""
+            print(f"   ✂️ Rank {clip.get('rank', '?')}: cut to {max_seconds:g}s cap{detail} (--max-clip-duration).")
+        capped.append(new)
+    return capped
+
+
 def print_preview(hasil_json: list[dict]) -> None:
     """Print a human-readable metadata preview to stdout."""
     print("✅ Preview metadata siap.")

@@ -17,7 +17,7 @@ def test_cli_help_does_not_require_fastapi_or_gpu(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     for flag in ("--url", "--yt-cookies", "--load-gemini-json", "--ai-provider", "--story-mode",
-                 "--gameplay-layout", "--source-section"):
+                 "--gameplay-layout", "--source-section", "--max-clip-duration"):
         assert flag in result.stdout
     assert not (tmp_path / "outputs").exists()
 

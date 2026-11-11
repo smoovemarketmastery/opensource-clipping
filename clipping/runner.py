@@ -10,6 +10,7 @@ import os
 
 from . import diarization as diarization_mod
 from . import engine, metadata, studio, hook_manager, voiceover
+from .config import MAX_CLIP_DURATION
 
 
 def run_pipeline(cfg, whisper_model_instance=None) -> list[dict]:
@@ -102,6 +103,8 @@ def run_pipeline(cfg, whisper_model_instance=None) -> list[dict]:
 
     # Step 4 — Metadata normalisation
     hasil_json = metadata.normalize_and_validate(hasil_json)
+    hasil_json = metadata.cap_clip_durations(
+        hasil_json, getattr(cfg, "max_clip_duration", MAX_CLIP_DURATION))
     metadata.print_preview(hasil_json)
 
     metadata_path = os.path.join(cfg.outputs_dir, "metadata_preview.json")
