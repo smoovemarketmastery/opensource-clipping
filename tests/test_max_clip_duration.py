@@ -38,7 +38,52 @@ def test_keep_segments_share_one_budget(capsys):
     assert out["keep_segments"] == [{"start_time": 0.0, "end_time": 30.0},
                                     {"start_time": 50.0, "end_time": 78.0}]
     assert sum(s["end_time"] - s["start_time"] for s in out["keep_segments"]) == 58
-    assert "Rank 2: cut to 58s" in capsys.readouterr().out
+    assert "Rank 2: cut to 58s cap (--max-clip-duration)" in capsys.readouterr().out
+
+
+def test_string_clip_times_come_back_as_floats():
+    [out] = metadata.cap_clip_durations([{"start_time": "100", "end_time": "189"}], 58)
+    assert out["end_time"] - out["start_time"] == 58
+
+
+def test_cap_to_one_segment_renders_that_segment_window():
+    clip = {"start_time": 0.0, "end_time": 120.0, "keep_segments": [
+        {"start_time": 5.0, "end_time": 45.0}, {"start_time": 55.0, "end_time": 85.0}]}
+    [out] = metadata.cap_clip_durations([clip], 40)
+    assert (out["start_time"], out["end_time"]) == (5.0, 45.0)
+    assert out["keep_segments"] == [{"start_time": 5.0, "end_time": 45.0}]
+
+
+def test_existing_single_segment_clip_keeps_its_window():
+    clip = {"start_time": 0.0, "end_time": 100.0, "keep_segments": [{"start_time": 5.0, "end_time": 50.0}]}
+    [out] = metadata.cap_clip_durations([clip], 58)
+    assert (out["start_time"], out["end_time"]) == (0.0, 58.0)
+
+
+def test_malformed_segments_are_skipped_without_changing_the_budget():
+    clip = {"start_time": 0.0, "end_time": 200.0, "keep_segments": [
+        "junk", {"start_time": "1:40", "end_time": 110}, {"end_time": 5},
+        {"start_time": 80.0, "end_time": 20.0},   # reversed: dropped, must not add budget
+        {"start_time": 0.0, "end_time": 40.0},
+        {"start_time": 100.0, "end_time": 140.0},  # only 18s fits
+        {"start_time": 150.0, "end_time": 190.0},  # over budget: dropped
+    ]}
+    [out] = metadata.cap_clip_durations([clip], 58)
+    assert out["keep_segments"] == [{"start_time": 0.0, "end_time": 40.0},
+                                    {"start_time": 100.0, "end_time": 118.0}]
+
+
+def test_segment_dict_instead_of_list_is_accepted():
+    clip = {"start_time": 0.0, "end_time": 90.0, "keep_segments": {"start_time": 0.0, "end_time": 90.0}}
+    [out] = metadata.cap_clip_durations([clip], 58)
+    assert out["keep_segments"] == [{"start_time": 0.0, "end_time": 58.0}]
+
+
+def test_notice_reports_the_segment_total_when_it_is_shorter(capsys):
+    clip = {"rank": 3, "start_time": 0.0, "end_time": 120.0, "keep_segments": [
+        {"start_time": 0.0, "end_time": 10.0}, {"start_time": 20.0, "end_time": 30.0}]}
+    metadata.cap_clip_durations([clip], 58)
+    assert "Rank 3: cut to 58s cap (20s after segment trim)" in capsys.readouterr().out
 
 
 def test_flag_default_and_bounds(capsys):
