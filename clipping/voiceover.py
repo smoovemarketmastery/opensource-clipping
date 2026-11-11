@@ -11,6 +11,8 @@ import asyncio
 from google import genai
 from google.genai import types
 
+from clipping.config import GEMINI_FALLBACK_MODEL, GEMINI_MODEL
+
 try:
     import edge_tts
 except ImportError:
@@ -234,8 +236,8 @@ def generate_commentary_script(transcript_snippet: str, cfg, style="analysis", l
         top_p=0.9,
     )
     
-    model = getattr(cfg, "gemini_model", "gemini-3-flash-preview")
-    fallback = getattr(cfg, "gemini_fallback_model", "gemini-2.5-flash")
+    model = getattr(cfg, "gemini_model", GEMINI_MODEL)
+    fallback = getattr(cfg, "gemini_fallback_model", GEMINI_FALLBACK_MODEL)
     
     try:
         response = client.models.generate_content(

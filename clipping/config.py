@@ -156,7 +156,7 @@ RENDER_OUTPUT_HEIGHT = 1080
 AI_PROVIDER = "gemini"
 NVIDIA_MODEL = "deepseek-ai/deepseek-v4-pro"
 GEMINI_MODEL = "gemini-3-flash-preview"
-GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"  # 2.5-flash returns 404 for new API keys
 
 # Clip length bounds in seconds (main part; the hook teaser is added on top).
 # --max-clip-duration lowers the upper bound per run.
