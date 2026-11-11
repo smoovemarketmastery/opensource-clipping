@@ -38,3 +38,39 @@ def test_timeout_retries_main_model_before_fallback(monkeypatch):
     client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
     assert engine._generate_json_with_retry(client, "main", "fallback", "x", None) == [{"rank": 1}]
     assert calls == ["main", "main"]
+
+
+def _client(fail_main, calls):
+    def generate_content(model, contents, config):
+        calls.append(model)
+        if model == "main" and fail_main(calls.count("main")):
+            raise fail_main.error
+        return SimpleNamespace(text='[{"rank": 1}]')
+    return SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+
+
+def test_persistent_timeout_stops_after_the_cap_then_uses_fallback(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = Exception("The read operation timed out")
+    assert engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * engine.TIMEOUT_MAX_ATTEMPTS + ["fallback"]
+
+
+def test_busy_errors_still_get_more_than_the_timeout_cap(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    first_four = lambda n: n <= 4
+    first_four.error = Exception("503 UNAVAILABLE. This model is currently experiencing high demand.")
+    assert engine._generate_json_with_retry(_client(first_four, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * 5
+
+
+def test_not_found_goes_straight_to_fallback(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = Exception("404 NOT_FOUND. This model is no longer available to new users.")
+    assert engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main", "fallback"]
