@@ -317,7 +317,7 @@ python main.py --help
 | `--whisper-device` | `cuda` | Whisper device (`cuda`, `cpu`, `auto`) |
 | `--whisper-compute-type` | `float16` | Compute type for Whisper (`float32`, `float16`, `int8`, etc.) |
 | `--gemini-model` | `gemini-3-flash-preview` | Gemini model name |
-| `--gemini-fallback-model` | `gemini-2.5-flash` | Gemini fallback model name if main model fails |
+| `--gemini-fallback-model` | `gemini-3.5-flash-lite` | Gemini fallback model name if main model fails |
 | `--load-gemini-json` | `False` | Load the saved `gemini_response.json` from the output directory to bypass the Gemini API call |
 | `--split-screen` | `False` | Enable split-screen mode for podcasts (9:16 only, requires `HF_TOKEN`). Supports 3+ speakers across multiple scenes |
 | `--dynamic-split` | `False` | Automatically switch between full-screen and split-screen based on activity (requires `--split-screen`) |
@@ -541,7 +541,7 @@ URL_YOUTUBE = "https://www.youtube.com/watch?v=UXhdIF8kvCI"
 JUMLAH_CLIP = 7
 RASIO = "9:16"
 FONT_STYLE = "DEFAULT"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 !python main.py \
   --url "{URL_YOUTUBE}" \
@@ -566,7 +566,7 @@ URL_YOUTUBE = "https://www.youtube.com/watch?v=UXhdIF8kvCI"
 JUMLAH_CLIP = 3
 RASIO = "9:16"
 FONT_STYLE = "DEFAULT"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 !python main.py \
   --url "{URL_YOUTUBE}" \

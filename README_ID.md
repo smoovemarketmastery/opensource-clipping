@@ -306,7 +306,7 @@ python main.py --help
 | `--whisper-device` | `cuda` | Device Whisper (`cuda`, `cpu`, `auto`) |
 | `--whisper-compute-type` | `float16` | Tipe komputasi Whisper (`float32`, `float16`, `int8`, dll) |
 | `--gemini-model` | `gemini-3-flash-preview` | Nama model Gemini |
-| `--gemini-fallback-model` | `gemini-2.5-flash` | Nama model fallback Gemini jika model utama gagal |
+| `--gemini-fallback-model` | `gemini-3.5-flash-lite` | Nama model fallback Gemini jika model utama gagal |
 | `--load-gemini-json` | `False` | Memuat file `gemini_response.json` dari folder output untuk melewati pemanggilan API Gemini AI (berguna untuk reproduksi/debug) |
 | `--split-screen` | `False` | Aktifkan mode split-screen untuk podcast (hanya 9:16, butuh `HF_TOKEN`). Mendukung 3+ speaker lintas scene |
 | `--diarization-speakers` | `auto` | Jumlah speaker untuk diarization (set ke `3` untuk fix 3 orang, atau `auto` untuk deteksi visual AI otomatis) |
@@ -664,7 +664,7 @@ URL_YOUTUBE = "https://www.youtube.com/watch?v=UXhdIF8kvCI"
 JUMLAH_CLIP = 7
 RASIO = "9:16"
 FONT_STYLE = "DEFAULT"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 !python main.py \
   --url "{URL_YOUTUBE}" \
@@ -689,7 +689,7 @@ URL_YOUTUBE = "https://www.youtube.com/watch?v=UXhdIF8kvCI"
 JUMLAH_CLIP = 3
 RASIO = "9:16"
 FONT_STYLE = "DEFAULT"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 !python main.py \
   --url "{URL_YOUTUBE}" \
