@@ -795,6 +795,8 @@ def _extract_status_code(exc: Exception):
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
     if isinstance(exc, json.JSONDecodeError):
         return True
 
@@ -812,7 +814,8 @@ def _is_retryable(exc: Exception) -> bool:
 
 def _is_timeout(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return isinstance(exc, TimeoutError) or any(k in msg for k in ("timed out", "timeout", "deadline"))
+    return (isinstance(exc, TimeoutError) or _extract_status_code(exc) == 408
+            or any(k in msg for k in ("timed out", "timeout", "deadline")))
 
 
 def _generate_json_with_retry(client, model, fallback_model, contents, config):
@@ -877,7 +880,7 @@ def _generate_json_with_retry(client, model, fallback_model, contents, config):
             ) from exc_fallback
 
     raise RuntimeError(
-        f"Gagal memanggil Gemini setelah {MAX_ATTEMPTS} percobaan. Error terakhir: {last_exc}"
+        f"Gagal memanggil Gemini setelah {attempt} percobaan. Error terakhir: {last_exc}"
     ) from last_exc
 
 

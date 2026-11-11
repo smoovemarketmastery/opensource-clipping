@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -74,3 +76,27 @@ def test_not_found_goes_straight_to_fallback(monkeypatch):
     always.error = Exception("404 NOT_FOUND. This model is no longer available to new users.")
     assert engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None) == [{"rank": 1}]
     assert calls == ["main", "fallback"]
+
+
+def test_bare_timeout_error_is_retryable(monkeypatch):
+    engine = _engine(monkeypatch)
+    assert engine._is_retryable(TimeoutError())
+
+
+def test_bare_timeout_error_also_stops_after_the_cap(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = TimeoutError()
+    assert engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * 3 + ["fallback"]
+
+
+def test_status_408_counts_as_timeout_and_error_reports_real_attempts(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = type("E", (Exception,), {"code": 408})("request expired")
+    with pytest.raises(RuntimeError, match="setelah 3 percobaan"):
+        engine._generate_json_with_retry(_client(always, calls), "main", None, "x", None)
+    assert calls == ["main"] * 3
