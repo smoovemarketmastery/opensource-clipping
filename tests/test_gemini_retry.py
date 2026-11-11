@@ -63,10 +63,55 @@ def test_persistent_timeout_stops_after_the_cap_then_uses_fallback(monkeypatch):
 def test_busy_errors_still_get_more_than_the_timeout_cap(monkeypatch):
     engine = _engine(monkeypatch)
     calls = []
-    first_four = lambda n: n <= 4
-    first_four.error = Exception("503 UNAVAILABLE. This model is currently experiencing high demand.")
-    assert engine._generate_json_with_retry(_client(first_four, calls), "main", "fallback", "x", None) == [{"rank": 1}]
-    assert calls == ["main"] * 5
+    first_three = lambda n: n <= 3   # 3 > TIMEOUT_MAX_ATTEMPTS would already have stopped a timeout
+    first_three.error = Exception("503 UNAVAILABLE. This model is currently experiencing high demand.")
+    assert engine._generate_json_with_retry(_client(first_three, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * 4
+
+
+BUSY_503 = Exception("503 UNAVAILABLE. This model is currently experiencing high demand.")
+
+
+def test_busy_streak_switches_to_a_different_fallback_after_the_busy_cap(monkeypatch, capsys):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = BUSY_503
+    assert engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None) == [{"rank": 1}]
+    assert calls == ["main"] * engine.BUSY_MAX_ATTEMPTS + ["fallback"]
+    assert "sibuk 4x" in capsys.readouterr().out
+
+
+def test_rate_limit_429_counts_as_busy(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = type("E", (Exception,), {"code": 429})("RESOURCE_EXHAUSTED")
+    engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None)
+    assert calls == ["main"] * engine.BUSY_MAX_ATTEMPTS + ["fallback"]
+
+
+def test_busy_keeps_all_attempts_when_fallback_is_the_same_model_or_missing(monkeypatch):
+    engine = _engine(monkeypatch)
+    always = lambda n: True
+    always.error = BUSY_503
+    calls = []
+    with pytest.raises(RuntimeError, match="utama & fallback"):   # the same busy model fails again
+        engine._generate_json_with_retry(_client(always, calls), "main", "main", "x", None)
+    assert calls == ["main"] * (engine.MAX_ATTEMPTS + 1)   # 10 tries + the same-model fallback call
+    calls = []
+    with pytest.raises(RuntimeError, match="setelah 10 percobaan"):
+        engine._generate_json_with_retry(_client(always, calls), "main", None, "x", None)
+    assert calls == ["main"] * engine.MAX_ATTEMPTS
+
+
+def test_other_5xx_errors_keep_all_attempts(monkeypatch):
+    engine = _engine(monkeypatch)
+    calls = []
+    always = lambda n: True
+    always.error = Exception("500 INTERNAL. An internal error has occurred.")
+    engine._generate_json_with_retry(_client(always, calls), "main", "fallback", "x", None)
+    assert calls == ["main"] * engine.MAX_ATTEMPTS + ["fallback"]
 
 
 def test_not_found_goes_straight_to_fallback(monkeypatch):

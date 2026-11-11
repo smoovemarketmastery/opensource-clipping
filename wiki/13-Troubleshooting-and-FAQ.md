@@ -185,7 +185,7 @@ Yes! Supported platforms:
 ### Q: What if AI generates bad clips?
 
 Try these approaches:
-1. **Change the Gemini model**: try a newer model, e.g. `--gemini-model gemini-3.6-flash` (check [Google AI Studio](https://aistudio.google.com) for the current names; `gemini-2.5-flash` returns 404 for new API keys)
+1. **Change the Gemini model**: try a different current model, e.g. `--gemini-model gemini-3.5-flash-lite` (check [Google AI Studio](https://aistudio.google.com) for the current names; `gemini-2.5-flash` returns 404 for new API keys and `gemini-3.6-flash` retires on 2026-11-19)
 2. **Increase clip count**: `--clips 10` (more choices = better chance of good clips)
 3. **Try NVIDIA NIM**: `--ai-provider nvidia`
 4. **Manual curation**: Use `--load-gemini-json` to edit the JSON and re-render
