@@ -10,7 +10,7 @@ Complete reference for all command-line arguments. Run `python main.py --help` f
 |---|---|---|
 | `--url`, `-u` | — | Video URL to process (**Required** unless `--story-mode`) |
 | `--source` | `youtube` | Video source platform: `youtube`, `tiktok`, `instagram`, `gdrive`, `twitch`, `kick` |
-| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00` (keyframe-aligned). A cached source is reused only if its `.source.json` sidecar matches the source and range. With `--use-dlp-subs`, platform subtitles are skipped for a section (their timestamps are for the full video), so Whisper transcribes the section instead: slower, and accuracy can differ from YouTube's captions |
+| `--source-section` | `None` | Download only part of a long VOD, e.g. `2:00:00-3:30:00` (keyframe-aligned). A cached source is reused only if its `.source.json` sidecar matches the source and range. With `--use-dlp-subs`, platform subtitles are skipped for a section (their timestamps are for the full video), so Whisper transcribes the section instead: slower, and accuracy can differ from YouTube's captions. To pick the busiest stretch of a Twitch VOD from its chat, use `scripts/chat_spikes.py` (see CHANGELOG) |
 | `--clips`, `-n` | `7` | Number of highlight clips to generate |
 | `--ratio`, `-r` | `9:16` | Output aspect ratio: `9:16`, `16:9`, `1:1`, `3:4`, `4:5` |
 | `--source-height` | `max` | Preferred source download max height (`max`, `1080`, `1440`, `2160`) |
