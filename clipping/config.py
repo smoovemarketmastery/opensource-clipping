@@ -820,6 +820,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Volume of the original video audio when voice-over is active.",
     )
     vo_group.add_argument(
+        "--loudnorm",
+        action="store_true",
+        default=False,
+        help="Normalize each finished clip's audio to about -14 LUFS (the TikTok/Shorts playback level), "
+             "so quiet and loud clips play at the same volume. Video is copied, not re-encoded.",
+    )
+    vo_group.add_argument(
         "--edge-glow",
         action="store_true",
         default=False,
@@ -1096,6 +1103,7 @@ def build_config(argv: list[str] | None = None) -> SimpleNamespace:
         voiceover_volume=args.voiceover_volume,
         original_volume=args.original_volume,
         edge_glow=args.edge_glow,
+        loudnorm=args.loudnorm,
         edge_glow_mode=args.edge_glow_mode,
         # Watermark
         watermark_enabled=args.watermark,
