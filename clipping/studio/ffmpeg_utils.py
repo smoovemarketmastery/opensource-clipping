@@ -2,7 +2,39 @@
 FFmpeg and encoder utilities for Studio rendering pipeline.
 """
 
+import os
 import subprocess
+
+# TikTok and YouTube Shorts play back around -14 LUFS; single-pass loudnorm gets close enough.
+LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+def normalize_loudness(path):
+    """Re-encode *path*'s audio to about -14 LUFS in place; the video stream is copied.
+
+    Returns False (file untouched) when there is no audio. Raises CalledProcessError if ffmpeg fails;
+    the original file is kept in that case.
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True,
+    )
+    if not probe.stdout.strip():
+        return False
+    tmp = path + ".loudnorm.mp4"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", path,
+             "-map", "0:v?", "-map", "0:a:0", "-c:v", "copy",
+             "-af", LOUDNORM_FILTER, "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+             "-movflags", "+faststart", tmp],
+            check=True, capture_output=True, text=True,
+        )
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return True
 
 def format_seconds(seconds):
     """

@@ -89,6 +89,7 @@ get_mp4_encode_args = _ffmpeg_utils.get_mp4_encode_args
 open_ffmpeg_video_writer = _ffmpeg_utils.open_ffmpeg_video_writer
 build_ffmpeg_progress_cmd = _ffmpeg_utils.build_ffmpeg_progress_cmd
 run_ffmpeg_with_progress = _ffmpeg_utils.run_ffmpeg_with_progress
+normalize_loudness = _ffmpeg_utils.normalize_loudness
 v2_helpers = _load_studio_internal_module("v2_helpers.py", "clipping_studio_v2_helpers")
 edge_glow_mod = _load_studio_internal_module("edge_glow.py", "clipping_studio_edge_glow")
 generate_edge_glow_video = edge_glow_mod.generate_edge_glow_video
@@ -1101,6 +1102,20 @@ def proses_klip(
                 finally:
                     if os.path.exists(glow_full_path):
                         os.remove(glow_full_path)
+
+        # LOUDNESS (optional, --loudnorm): even out volume across clips; failure keeps the original audio.
+        render_stage = "loudnorm"
+        if getattr(cfg, "loudnorm", False):
+            for final_path, _, _, _ in concat_runs:
+                if not os.path.exists(final_path):
+                    continue
+                try:
+                    if normalize_loudness(final_path):
+                        print(f"   🔊 [Loudness] {os.path.basename(final_path)} normalized to -14 LUFS")
+                except subprocess.CalledProcessError as e:
+                    _trace_render_failure(e, "loudnorm", rank, fallback=True)
+                    print(f"   ⚠️ [Loudness] Failed for {os.path.basename(final_path)}, kept original audio: "
+                          f"{(e.stderr or '')[-300:]}")
 
         render_stage = "thumbnail"
         judul_thumbnail = judul_en or judul or f"Highlight {rank}"
