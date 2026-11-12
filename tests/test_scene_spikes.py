@@ -44,6 +44,13 @@ def test_window_longer_than_video_returns_the_whole_video():
     assert len(picks) == 1 and (picks[0]["start"], picks[0]["end"]) == (0.0, 30.0)
 
 
+@pytest.mark.parametrize("silence_db", [-118.0, -91.0])
+def test_inaudible_audio_scores_nothing(silence_db):
+    scores = ss.second_scores(cuts=[], levels=[silence_db] * 30, length=30)
+    assert all(s == 0.0 for s in scores)
+    assert ss.best_windows(scores, cuts=[], window=5) == []
+
+
 def test_nothing_happening_returns_nothing():
     assert ss.best_windows([0.0] * 60, cuts=[], window=10) == []
     assert ss.second_scores([], [], 0) == [0.0]

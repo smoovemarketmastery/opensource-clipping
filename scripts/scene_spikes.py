@@ -75,11 +75,12 @@ def second_scores(cuts, levels, length):
     for t in cuts:
         if 0 <= t < n:
             scores[int(t)] += CUT_WEIGHT
-    if levels:
-        audible = [db for db in levels if db > -90] or [-120.0]
+    audible = [db for db in levels if db > -90]  # at or below -90 dB is silence, not a loudness spike
+    if audible:
         median = statistics.median(audible)
         for i, db in enumerate(levels[:n]):
-            scores[i] += max(0.0, (db - median) / LOUD_DB_PER_POINT)
+            if db > -90:
+                scores[i] += max(0.0, (db - median) / LOUD_DB_PER_POINT)
     return scores
 
 
